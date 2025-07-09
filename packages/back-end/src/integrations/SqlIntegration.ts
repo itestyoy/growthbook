@@ -5193,9 +5193,11 @@ ${this.selectStarLimit("__topValues ORDER BY count DESC", limit)}
 
 
   private getAggregateFilterMetricHaving({
-    metric
+    metric,
+    useDenominator,
   }: {
     metric: ExperimentMetricInterface;
+    useDenominator?: boolean;
   }) {
     // Fact Metrics
     if (isFactMetric(metric)) {
