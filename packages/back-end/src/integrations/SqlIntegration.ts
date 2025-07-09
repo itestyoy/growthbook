@@ -4997,12 +4997,15 @@ ${this.selectStarLimit("__topValues ORDER BY count DESC", limit)}
       where.push(`${cols.timestamp} <= ${this.toTimestamp(endDate)}`);
     }
 
+    const aggregateFilterMetricColumn = this.getAggregateFilterMetricColumn({metric: metric});
+
     return compileSqlTemplate(
       `-- Metric (${metric.name})
       SELECT
         ${userIdCol} as ${baseIdType},
         ${cols.value} as value,
         ${timestampDateTimeColumn} as timestamp
+        ${aggregateFilterMetricColumn ? ', ' aggregateFilterMetricColumn + ' as aggregate_filter_metric_value' : ''}
       FROM
         ${
           queryFormat === "sql" || queryFormat === "fact"
@@ -5182,6 +5185,24 @@ ${this.selectStarLimit("__topValues ORDER BY count DESC", limit)}
     )}`;
   }
 
+ private getAggregateFilterMetricColumn({
+    metric,
+    useDenominator,
+  }: {
+    metric: ExperimentMetricInterface | null;
+    useDenominator?: boolean;
+  }) {
+    // Fact Metrics
+    if (metric && isFactMetric(metric)) {
+      const columnRef = useDenominator ? metric.denominator : metric.numerator;
+
+      if (columnRef?.aggregateFilterColumn) {
+        return columnRef?.aggregateFilterColumn === "$$count"
+            ? '1'
+            : columnRef?.aggregateFilterColumn
+      }
+    }
+ }
 
   private getAggregateFilterMetricHaving({
     metric,
@@ -5197,10 +5218,7 @@ ${this.selectStarLimit("__topValues ORDER BY count DESC", limit)}
       const aggregateFilter =
         getAggregateFilters({
             columnRef: columnRef,
-            column:
-              columnRef?.aggregateFilterColumn === "$$count"
-                ? `COUNT(*)`
-                : `SUM(${columnRef?.aggregateFilterColumn})`,
+            column: `SUM(aggregate_filter_metric_value)`,
             ignoreInvalid: true,
         });
 
