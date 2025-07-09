@@ -2056,16 +2056,7 @@ export default abstract class SqlIntegration
       ${segment ? `WHERE s.date <= e.timestamp` : ""}
       GROUP BY
         e.${baseIdType} 
-      ${
-          activationMetric 
-            ? `HAVING 
-                ${['(1 = 1)', 
-                  ...getAggregateFilterMetricHaving({
-                      metric: activationMetric
-                    })].join(" AND ")
-                }`
-            : ""
-      }
+      ${this.getAggregateFilterMetricHaving({metric: activationMetric})}
     )`;
   }
 
@@ -5213,9 +5204,9 @@ ${this.selectStarLimit("__topValues ORDER BY count DESC", limit)}
             ignoreInvalid: true,
         });
 
-      return aggregateFilter
+      return aggregateFilter.length > 0 ? 'HAVING ' + aggregateFilter.join(' AND ') : ""
     } else {
-      return []
+      return ""
     }
   }
     
