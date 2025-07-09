@@ -5005,7 +5005,7 @@ ${this.selectStarLimit("__topValues ORDER BY count DESC", limit)}
         ${userIdCol} as ${baseIdType},
         ${cols.value} as value,
         ${timestampDateTimeColumn} as timestamp
-        ${aggregateFilterMetricColumn ? ', ' aggregateFilterMetricColumn + ' as aggregate_filter_metric_value' : ''}
+        ${aggregateFilterMetricColumn ? ', ' + aggregateFilterMetricColumn + ' as aggregate_filter_metric_value' : ''}
       FROM
         ${
           queryFormat === "sql" || queryFormat === "fact"
