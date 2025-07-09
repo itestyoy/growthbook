@@ -5198,9 +5198,9 @@ ${this.selectStarLimit("__topValues ORDER BY count DESC", limit)}
         getAggregateFilters({
             columnRef: columnRef,
             column:
-              columnRef.aggregateFilterColumn === "$$count"
+              columnRef?.aggregateFilterColumn === "$$count"
                 ? `COUNT(*)`
-                : `SUM(${columnRef.aggregateFilterColumn})`,
+                : `SUM(${columnRef?.aggregateFilterColumn})`,
             ignoreInvalid: true,
         });
 
