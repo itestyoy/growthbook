@@ -5187,11 +5187,11 @@ ${this.selectStarLimit("__topValues ORDER BY count DESC", limit)}
     metric,
     useDenominator,
   }: {
-    metric: ExperimentMetricInterface;
+    metric: ExperimentMetricInterface | null;
     useDenominator?: boolean;
   }) {
     // Fact Metrics
-    if (isFactMetric(metric)) {
+    if (metric && isFactMetric(metric)) {
       const columnRef = useDenominator ? metric.denominator : metric.numerator;
 
       const aggregateFilter =
