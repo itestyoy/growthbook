@@ -2055,19 +2055,19 @@ export default abstract class SqlIntegration
         }
       ${segment ? `WHERE s.date <= e.timestamp` : ""}
       GROUP BY
-        e.${baseIdType}
+        e.${baseIdType} 
       ${
           activationMetric 
-          && activationMetric.numerator?.aggregateFilterColumn
-          && activationMetric.numerator?.aggregateFilter
-            ? `HAVING ${getAggregateFilters({
+            ? `HAVING 
+                ${['(1 = 1)', 
+                  ...getAggregateFilters({
                       columnRef: activationMetric.numerator,
                       column:
                         activationMetric.numerator.aggregateFilterColumn === "$$count"
                           ? `COUNT(*)`
                           : `SUM(${activationMetric.numerator.aggregateFilterColumn})`,
                       ignoreInvalid: true,
-                    }).join("\n")
+                    })].join(" AND ")
                 }`
             : ""
       }
