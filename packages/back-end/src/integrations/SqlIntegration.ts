@@ -2060,13 +2060,8 @@ export default abstract class SqlIntegration
           activationMetric 
             ? `HAVING 
                 ${['(1 = 1)', 
-                  ...getAggregateFilters({
-                      columnRef: activationMetric.numerator,
-                      column:
-                        activationMetric.numerator.aggregateFilterColumn === "$$count"
-                          ? `COUNT(*)`
-                          : `SUM(${activationMetric.numerator.aggregateFilterColumn})`,
-                      ignoreInvalid: true,
+                  ...getAggregateFilterMetricHaving({
+                      metric: activationMetric
                     })].join(" AND ")
                 }`
             : ""
@@ -5196,6 +5191,32 @@ ${this.selectStarLimit("__topValues ORDER BY count DESC", limit)}
     )}`;
   }
 
+
+  private getAggregateFilterMetricHaving({
+    metric
+  }: {
+    metric: ExperimentMetricInterface;
+  }) {
+    // Fact Metrics
+    if (isFactMetric(metric)) {
+      const columnRef = useDenominator ? metric.denominator : metric.numerator;
+
+      const aggregateFilter =
+        getAggregateFilters({
+            columnRef: columnRef,
+            column:
+              columnRef.aggregateFilterColumn === "$$count"
+                ? `COUNT(*)`
+                : `SUM(${columnRef.aggregateFilterColumn})`,
+            ignoreInvalid: true,
+        });
+
+      return aggregateFilter
+    } else {
+      return []
+    }
+  }
+    
   private getAggregateMetricColumn({
     metric,
     useDenominator,
