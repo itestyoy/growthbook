@@ -2053,10 +2053,11 @@ export default abstract class SqlIntegration
             ? `LEFT JOIN __activationMetric a ON (a.${baseIdType} = e.${baseIdType})`
             : ""
         }
-      ${segment ? `WHERE s.date <= e.timestamp` : ""}
+      WHERE (1 = 1)
+      ${segment ? `AND s.date <= e.timestamp` : ""}
+      ${this.getAggregateFilterMetricClause({metric: activationMetric})}
       GROUP BY
         e.${baseIdType} 
-      ${this.getAggregateFilterMetricHaving({metric: activationMetric})}
     )`;
   }
 
@@ -5198,13 +5199,21 @@ ${this.selectStarLimit("__topValues ORDER BY count DESC", limit)}
 
       if (columnRef?.aggregateFilterColumn) {
         return columnRef?.aggregateFilterColumn === "$$count"
-            ? '1'
-            : columnRef?.aggregateFilterColumn
+            ? `sum(1) over (
+                    partition by user_id 
+                    order by timestamp asc
+                    rows between unbounded preceding and current row
+                  )`
+            : `sum(${columnRef?.aggregateFilterColumn}) over (
+                    partition by user_id 
+                    order by timestamp asc
+                    rows between unbounded preceding and current row
+                  )`
       }
     }
  }
 
-  private getAggregateFilterMetricHaving({
+  private getAggregateFilterMetricClause({
     metric,
     useDenominator,
   }: {
@@ -5218,11 +5227,11 @@ ${this.selectStarLimit("__topValues ORDER BY count DESC", limit)}
       const aggregateFilter =
         getAggregateFilters({
             columnRef: columnRef,
-            column: `SUM(aggregate_filter_metric_value)`,
+            column: `aggregate_filter_metric_value`,
             ignoreInvalid: true,
         });
 
-      return aggregateFilter.length > 0 ? 'HAVING ' + aggregateFilter.join(' AND ') : ""
+      return aggregateFilter.length > 0 ? 'AND ' + aggregateFilter.join(' AND ') : ""
     } else {
       return ""
     }
