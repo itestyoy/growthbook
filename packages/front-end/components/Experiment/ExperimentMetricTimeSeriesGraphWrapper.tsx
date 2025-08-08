@@ -1,9 +1,13 @@
+import * as Sentry from "@sentry/nextjs";
+import { useMemo } from "react";
+import { ErrorBoundary } from "react-error-boundary";
 import { Flex } from "@radix-ui/themes";
 import { DifferenceType, StatsEngine } from "back-end/types/stats";
 import { ExperimentStatus } from "back-end/src/validators/experiments";
 import { MetricTimeSeries } from "back-end/src/validators/metric-time-series";
 import { daysBetween, getValidDate } from "shared/dates";
 import { addDays, min } from "date-fns";
+import { filterInvalidMetricTimeSeries } from "shared/util";
 import { ExperimentMetricInterface, getAdjustedCI } from "shared/experiments";
 import useApi from "@/hooks/useApi";
 import { useDefinitions } from "@/services/DefinitionsContext";
@@ -13,23 +17,13 @@ import {
 } from "@/services/metrics";
 import usePValueThreshold from "@/hooks/usePValueThreshold";
 import { useCurrency } from "@/hooks/useCurrency";
-import { useSnapshot } from "./SnapshotProvider";
 import ExperimentTimeSeriesGraph, {
   ExperimentTimeSeriesGraphDataPoint,
 } from "./ExperimentTimeSeriesGraph";
 
-export default function ExperimentMetricTimeSeriesGraphWrapper({
-  experimentId,
-  experimentStatus,
-  metric,
-  differenceType,
-  variationNames,
-  showVariations,
-  statsEngine,
-  pValueAdjustmentEnabled,
-  firstDateToRender,
-}: {
+interface ExperimentMetricTimeSeriesGraphWrapperProps {
   experimentId: string;
+  phase: number;
   experimentStatus: ExperimentStatus;
   metric: ExperimentMetricInterface;
   differenceType: DifferenceType;
@@ -38,8 +32,37 @@ export default function ExperimentMetricTimeSeriesGraphWrapper({
   statsEngine: StatsEngine;
   pValueAdjustmentEnabled: boolean;
   firstDateToRender: Date;
-}) {
-  const { phase } = useSnapshot();
+}
+
+export default function ExperimentMetricTimeSeriesGraphWrapperWithErrorBoundary(
+  props: ExperimentMetricTimeSeriesGraphWrapperProps
+) {
+  return (
+    <ErrorBoundary
+      fallback={
+        <Message>Something went wrong while displaying this graph.</Message>
+      }
+      onError={(error) => {
+        Sentry.captureException(error);
+      }}
+    >
+      <ExperimentMetricTimeSeriesGraphWrapper {...props} />
+    </ErrorBoundary>
+  );
+}
+
+function ExperimentMetricTimeSeriesGraphWrapper({
+  experimentId,
+  phase,
+  experimentStatus,
+  metric,
+  differenceType,
+  variationNames,
+  showVariations,
+  statsEngine,
+  pValueAdjustmentEnabled,
+  firstDateToRender,
+}: ExperimentMetricTimeSeriesGraphWrapperProps) {
   const { getFactTableById } = useDefinitions();
   const pValueThreshold = usePValueThreshold();
 
@@ -54,6 +77,10 @@ export default function ExperimentMetricTimeSeriesGraphWrapper({
     `/experiments/${experimentId}/time-series?phase=${phase}&metricIds[]=${metric.id}`
   );
 
+  const filteredMetricTimeSeries = useMemo(() => {
+    return filterInvalidMetricTimeSeries(data?.timeSeries || []);
+  }, [data]);
+
   if (error) {
     return (
       <Message>
@@ -67,12 +94,12 @@ export default function ExperimentMetricTimeSeriesGraphWrapper({
     return <Message>Loading...</Message>;
   }
 
-  if (!data || data.timeSeries.length === 0) {
+  if (!filteredMetricTimeSeries || filteredMetricTimeSeries.length === 0) {
     return <Message>No time series data available for this metric.</Message>;
   }
 
-  // NB: Can use data.timeSeries[0] because we only fetch one metric
-  const timeSeries = data.timeSeries[0];
+  // NB: Can get first item because we only fetch one metric
+  const timeSeries = filteredMetricTimeSeries[0];
 
   const additionalGraphDataPoints: ExperimentTimeSeriesGraphDataPoint[] = [];
   const firstDataPointDate = getValidDate(timeSeries.dataPoints[0].date);

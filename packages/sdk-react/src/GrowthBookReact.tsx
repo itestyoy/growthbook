@@ -38,7 +38,7 @@ export async function getGrowthBookSSRData(
 
   // Load feature flags from network if needed
   if (context.clientKey) {
-    await gb.loadFeatures();
+    await gb.init();
   }
 
   const data: GrowthBookSSRData = {
@@ -110,7 +110,7 @@ export function FeaturesReady({
   children: React.ReactNode;
   timeout?: number;
   fallback?: React.ReactNode;
-}) {
+}): React.ReactElement {
   const gb = useGrowthBook();
   const [hitTimeout, setHitTimeout] = React.useState(false);
   const ready = gb ? gb.ready : false;
@@ -136,11 +136,14 @@ export function IfFeatureEnabled({
 }: {
   children: React.ReactNode;
   feature: string;
-}) {
+}): React.ReactElement | null {
   return useFeature(feature).on ? <>{children}</> : null;
 }
 
-export function FeatureString(props: { default: string; feature: string }) {
+export function FeatureString(props: {
+  default: string;
+  feature: string;
+}): React.ReactElement {
   const value = useFeature(props.feature).value;
 
   if (value !== null) {
@@ -154,9 +157,9 @@ export const withRunExperiment = <P extends WithRunExperimentProps>(
   Component: React.ComponentType<P>
 ): React.ComponentType<Omit<P, keyof WithRunExperimentProps>> => {
   // eslint-disable-next-line
-  const withRunExperimentWrapper = (props: any): JSX.Element => (
+  const withRunExperimentWrapper = (props: any): React.ReactElement => (
     <GrowthBookContext.Consumer>
-      {({ growthbook }): JSX.Element => {
+      {({ growthbook }): React.ReactElement => {
         return (
           <Component
             {...(props as P)}

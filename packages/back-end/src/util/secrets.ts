@@ -1,6 +1,4 @@
-import fs from "fs";
 import Handlebars from "handlebars";
-import dotenv from "dotenv";
 import trimEnd from "lodash/trimEnd";
 import { stringToBoolean } from "shared/util";
 import { DEFAULT_METRIC_WINDOW_HOURS } from "shared/constants";
@@ -8,10 +6,6 @@ import { z } from "zod";
 
 export const ENVIRONMENT = process.env.NODE_ENV;
 const prod = ENVIRONMENT === "production";
-
-if (fs.existsSync(".env.local")) {
-  dotenv.config({ path: ".env.local" });
-}
 
 export const LOG_LEVEL = process.env.LOG_LEVEL;
 
@@ -115,6 +109,9 @@ export const SLACK_SIGNING_SECRET = process.env.SLACK_SIGNING_SECRET || "";
 const testConn = process.env.POSTGRES_TEST_CONN;
 export const POSTGRES_TEST_CONN = testConn ? JSON.parse(testConn) : {};
 
+export const JOB_TIMEOUT_MS =
+  parseInt(process.env.JOB_TIMEOUT_MS || "") || 2 * 60 * 60 * 1000; // Defaults to 2 hours
+
 export const FASTLY_API_TOKEN = process.env.FASTLY_API_TOKEN || "";
 export const FASTLY_SERVICE_ID = process.env.FASTLY_SERVICE_ID || "";
 
@@ -164,6 +161,16 @@ export const STORE_SEGMENTS_IN_MONGO = stringToBoolean(
 export const ALLOW_CREATE_METRICS = stringToBoolean(
   process.env.ALLOW_CREATE_METRICS
 );
+
+// If set to false AND using a config file, don't allow creating dimension via the UI
+export const ALLOW_CREATE_DIMENSIONS = stringToBoolean(
+  process.env.ALLOW_CREATE_DIMENSIONS
+);
+
+// Defines the User-Agent header for all requests made by the API
+export const API_USER_AGENT =
+  process.env.API_USER_AGENT ||
+  (IS_CLOUD ? "GrowthBook Cloud (https://app.growthbook.io)" : "GrowthBook");
 
 // Add a default secret access key via an environment variable
 // Only allowed while self-hosting and not multi org

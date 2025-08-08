@@ -31,7 +31,7 @@ import { Resource } from "@opentelemetry/resources";
 import { SemanticResourceAttributes } from "@opentelemetry/semantic-conventions";
 import { OTLPMetricExporter } from "@opentelemetry/exporter-metrics-otlp-proto";
 import { PeriodicExportingMetricReader } from "@opentelemetry/sdk-metrics";
-import { getBuild } from "./util/handler";
+import { getBuild } from "./util/build";
 import { setMetrics, Attributes } from "./util/metrics";
 
 diag.setLogger(
@@ -87,8 +87,21 @@ const getCounter = (name: string) => {
   };
 };
 
+const getGauge = (name: string) => {
+  const gauge = otlMetrics.getMeter(name).createObservableGauge(name);
+
+  return {
+    record: (value: number, attributes?: Attributes) => {
+      gauge.addCallback((observableResult) => {
+        observableResult.observe(value, attributes);
+      });
+    },
+  };
+};
+
 setMetrics({
   getCounter,
   getHistogram: (name: string) =>
     otlMetrics.getMeter(name).createHistogram(name),
+  getGauge,
 });
