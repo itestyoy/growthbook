@@ -353,6 +353,10 @@ export interface paths {
     /** Get a single query */
     get: operations["getQuery"];
   };
+  "/settings": {
+    /** Get organization settings */
+    get: operations["getSettings"];
+  };
 }
 
 export type webhooks = Record<string, never>;
@@ -3372,6 +3376,7 @@ export interface components {
       datasource: string;
       userIdTypes: (string)[];
       sql: string;
+      archived?: boolean;
       /**
        * @description Where this fact table must be managed from. If not set (empty string), it can be managed from anywhere. 
        * @enum {string}
@@ -3486,6 +3491,7 @@ export interface components {
       dateCreated: string;
       /** Format: date-time */
       dateUpdated: string;
+      archived?: boolean;
     };
     Member: {
       id: string;
@@ -3535,6 +3541,71 @@ export interface components {
       externalId: string;
       dependencies: (string)[];
       runAtEnd: boolean;
+    };
+    Settings: {
+      confidenceLevel: number | null;
+      northStar: {
+        title?: string;
+        metricIds?: (string)[];
+      } | null;
+      metricDefaults: {
+        priorSettings?: {
+          override: boolean;
+          proper: boolean;
+          mean: number;
+          stddev: number;
+        };
+        minimumSampleSize?: number;
+        maxPercentageChange?: number;
+        minPercentageChange?: number;
+        targetMDE?: number;
+      } | null;
+      pastExperimentsMinLength: number | null;
+      metricAnalysisDays: number;
+      updateSchedule: ({
+        /** @enum {string} */
+        type?: "cron" | "never" | "stale";
+        cron?: string | null;
+        hours?: number | null;
+      }) | null;
+      multipleExposureMinPercent: number;
+      defaultRole: {
+        role?: string;
+        limitAccessByEnvironment?: boolean;
+        environments?: (string)[];
+      };
+      statsEngine: string | null;
+      pValueThreshold: number;
+      regressionAdjustmentEnabled: boolean;
+      regressionAdjustmentDays: number;
+      sequentialTestingEnabled: boolean;
+      sequentialTestingTuningParameter: number;
+      /** @enum {string} */
+      attributionModel: "firstExposure" | "experimentDuration";
+      targetMDE: number | null;
+      delayHours: number | null;
+      windowType: string | null;
+      windowHours: number | null;
+      winRisk: number | null;
+      loseRisk: number | null;
+      secureAttributeSalt: string;
+      killswitchConfirmation: boolean;
+      requireReviews: ({
+          requireReviewOn?: boolean;
+          resetReviewOnChange?: boolean;
+          environments?: (string)[];
+          projects?: (string)[];
+        })[];
+      featureKeyExample: string;
+      featureRegexValidator: string;
+      banditScheduleValue: number;
+      /** @enum {string} */
+      banditScheduleUnit: "hours" | "days";
+      banditBurnInValue: number;
+      /** @enum {string} */
+      banditBurnInUnit: "hours" | "days";
+      experimentMinLengthDays: number;
+      experimentMaxLengthDays?: number | null;
     };
     CodeRef: {
       /** @description The organization name */
@@ -11705,6 +11776,7 @@ export interface operations {
                 datasource: string;
                 userIdTypes: (string)[];
                 sql: string;
+                archived?: boolean;
                 /**
                  * @description Where this fact table must be managed from. If not set (empty string), it can be managed from anywhere. 
                  * @enum {string}
@@ -11769,6 +11841,7 @@ export interface operations {
               datasource: string;
               userIdTypes: (string)[];
               sql: string;
+              archived?: boolean;
               /**
                * @description Where this fact table must be managed from. If not set (empty string), it can be managed from anywhere. 
                * @enum {string}
@@ -11806,6 +11879,7 @@ export interface operations {
               datasource: string;
               userIdTypes: (string)[];
               sql: string;
+              archived?: boolean;
               /**
                * @description Where this fact table must be managed from. If not set (empty string), it can be managed from anywhere. 
                * @enum {string}
@@ -11850,6 +11924,7 @@ export interface operations {
            * @enum {string}
            */
           managedBy?: "" | "api";
+          archived?: boolean;
         };
       };
     };
@@ -11867,6 +11942,7 @@ export interface operations {
               datasource: string;
               userIdTypes: (string)[];
               sql: string;
+              archived?: boolean;
               /**
                * @description Where this fact table must be managed from. If not set (empty string), it can be managed from anywhere. 
                * @enum {string}
@@ -12220,6 +12296,7 @@ export interface operations {
                 dateCreated: string;
                 /** Format: date-time */
                 dateUpdated: string;
+                archived?: boolean;
               })[];
           }) & {
             limit: number;
@@ -12454,6 +12531,7 @@ export interface operations {
               dateCreated: string;
               /** Format: date-time */
               dateUpdated: string;
+              archived?: boolean;
             };
           };
         };
@@ -12561,6 +12639,7 @@ export interface operations {
               dateCreated: string;
               /** Format: date-time */
               dateUpdated: string;
+              archived?: boolean;
             };
           };
         };
@@ -12686,6 +12765,7 @@ export interface operations {
            * @enum {string}
            */
           managedBy?: "" | "api";
+          archived?: boolean;
         };
       };
     };
@@ -12782,6 +12862,7 @@ export interface operations {
               dateCreated: string;
               /** Format: date-time */
               dateUpdated: string;
+              archived?: boolean;
             };
           };
         };
@@ -13174,6 +13255,82 @@ export interface operations {
       };
     };
   };
+  getSettings: {
+    /** Get organization settings */
+    responses: {
+      200: {
+        content: {
+          "application/json": {
+            settings: {
+              confidenceLevel: number | null;
+              northStar: {
+                title?: string;
+                metricIds?: (string)[];
+              } | null;
+              metricDefaults: {
+                priorSettings?: {
+                  override: boolean;
+                  proper: boolean;
+                  mean: number;
+                  stddev: number;
+                };
+                minimumSampleSize?: number;
+                maxPercentageChange?: number;
+                minPercentageChange?: number;
+                targetMDE?: number;
+              } | null;
+              pastExperimentsMinLength: number | null;
+              metricAnalysisDays: number;
+              updateSchedule: ({
+                /** @enum {string} */
+                type?: "cron" | "never" | "stale";
+                cron?: string | null;
+                hours?: number | null;
+              }) | null;
+              multipleExposureMinPercent: number;
+              defaultRole: {
+                role?: string;
+                limitAccessByEnvironment?: boolean;
+                environments?: (string)[];
+              };
+              statsEngine: string | null;
+              pValueThreshold: number;
+              regressionAdjustmentEnabled: boolean;
+              regressionAdjustmentDays: number;
+              sequentialTestingEnabled: boolean;
+              sequentialTestingTuningParameter: number;
+              /** @enum {string} */
+              attributionModel: "firstExposure" | "experimentDuration";
+              targetMDE: number | null;
+              delayHours: number | null;
+              windowType: string | null;
+              windowHours: number | null;
+              winRisk: number | null;
+              loseRisk: number | null;
+              secureAttributeSalt: string;
+              killswitchConfirmation: boolean;
+              requireReviews: ({
+                  requireReviewOn?: boolean;
+                  resetReviewOnChange?: boolean;
+                  environments?: (string)[];
+                  projects?: (string)[];
+                })[];
+              featureKeyExample: string;
+              featureRegexValidator: string;
+              banditScheduleValue: number;
+              /** @enum {string} */
+              banditScheduleUnit: "hours" | "days";
+              banditBurnInValue: number;
+              /** @enum {string} */
+              banditBurnInUnit: "hours" | "days";
+              experimentMinLengthDays: number;
+              experimentMaxLengthDays?: number | null;
+            };
+          };
+        };
+      };
+    };
+  };
 }
 import { z } from "zod";
 import * as openApiValidators from "back-end/src/validators/openapi";
@@ -13216,6 +13373,7 @@ export type ApiFactMetric = z.infer<typeof openApiValidators.apiFactMetricValida
 export type ApiMember = z.infer<typeof openApiValidators.apiMemberValidator>;
 export type ApiArchetype = z.infer<typeof openApiValidators.apiArchetypeValidator>;
 export type ApiQuery = z.infer<typeof openApiValidators.apiQueryValidator>;
+export type ApiSettings = z.infer<typeof openApiValidators.apiSettingsValidator>;
 export type ApiCodeRef = z.infer<typeof openApiValidators.apiCodeRefValidator>;
 
 // Operations
@@ -13313,3 +13471,4 @@ export type ListCodeRefsResponse = operations["listCodeRefs"]["responses"]["200"
 export type PostCodeRefsResponse = operations["postCodeRefs"]["responses"]["200"]["content"]["application/json"];
 export type GetCodeRefsResponse = operations["getCodeRefs"]["responses"]["200"]["content"]["application/json"];
 export type GetQueryResponse = operations["getQuery"]["responses"]["200"]["content"]["application/json"];
+export type GetSettingsResponse = operations["getSettings"]["responses"]["200"]["content"]["application/json"];
