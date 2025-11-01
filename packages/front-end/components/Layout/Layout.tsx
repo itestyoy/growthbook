@@ -125,10 +125,7 @@ const navlinks: SidebarLinkProps[] = [
         name: "SQL Explorer",
         href: "/sql-explorer",
         path: /^sql-explorer/,
-        filter: ({ gb, savedQueries }) =>
-          !!gb?.isOn("sql-explorer") &&
-          // Only show SQL Explorer for orgs with saved queries that weren't created by dashboards
-          savedQueries.some((sq) => (sq.linkedDashboardIds ?? []).length === 0),
+        filter: ({ gb }) => !!gb?.isOn("sql-explorer"),
       },
     ],
   },
@@ -442,7 +439,10 @@ const Layout = (): React.ReactElement => {
     return null;
   }
 
-  let pageTitle = breadcrumb.map((b) => b.display).join(" > ");
+  let pageTitle = [...breadcrumb]
+    .reverse()
+    .map((b) => b.display)
+    .join(" - ");
 
   // If no breadcrumb provided, try to figure out a page name based on the path
   otherPageTitles.forEach((o) => {
