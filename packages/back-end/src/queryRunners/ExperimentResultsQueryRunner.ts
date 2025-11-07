@@ -107,7 +107,7 @@ export function getFactMetricGroup(metric: FactMetricInterface) {
   // and because they do not support re-aggregation across pre-computed dimensions
   if (quantileMetricType(metric)) {
     return metric.numerator.factTableId
-      ? `${metric.numerator.factTableId} (quantile metrics)`
+      ? `${metric.numerator.factTableId}_qtile`
       : "";
   }
   return metric.numerator.factTableId || "";
@@ -247,6 +247,7 @@ export const startExperimentResultQueries = async (
   const useUnitsTable =
     (integration.getSourceProperties().supportsWritingTables &&
       settings.pipelineSettings?.allowWriting &&
+      settings.pipelineSettings?.mode === "ephemeral" &&
       !!settings.pipelineSettings?.writeDataset &&
       hasPipelineModeFeature) ??
     false;
@@ -614,9 +615,11 @@ export class ExperimentResultsQueryRunner extends QueryRunner<
       : null;
 
     // Only include metrics tied to this experiment (both goal and guardrail metrics)
+    const metricGroups = await this.context.models.metricGroups.getAll();
     const selectedMetrics = getAllMetricIdsFromExperiment(
       snapshotSettings,
       false,
+      metricGroups,
     )
       .map((m) => metricMap.get(m))
       .filter((m) => m) as ExperimentMetricInterface[];
