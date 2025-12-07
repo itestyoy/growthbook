@@ -2178,7 +2178,9 @@ export default abstract class SqlIntegration
             ? `LEFT JOIN __activationMetric a ON (a.${baseIdType} = e.${baseIdType})`
             : ""
         }
-      ${segment ? `WHERE s.date <= e.timestamp` : ""}
+      WHERE (1 = 1)
+      ${segment ? `AND s.date <= e.timestamp` : ""}
+      ${this.getAggregateFilterMetricClause({metric: activationMetric})}
       GROUP BY
         e.${baseIdType}
     )`;
@@ -5740,12 +5742,15 @@ ${this.selectStarLimit("__topValues ORDER BY count DESC", limit)}
       where.push(`${cols.timestamp} <= ${this.toTimestamp(endDate)}`);
     }
 
+    const aggregateFilterMetricColumn = this.getAggregateFilterMetricColumn({metric: metric});
+        
     return compileSqlTemplate(
       `-- Metric (${metric.name})
       SELECT
         ${userIdCol} as ${baseIdType},
         ${cols.value} as value,
-        ${timestampDateTimeColumn} as timestamp
+        ${timestampDateTimeColumn} as timestamp,
+        ${aggregateFilterMetricColumn ? ', ' + aggregateFilterMetricColumn + ' as aggregate_filter_metric_value' : ''}
       FROM
         ${
           queryFormat === "sql" || queryFormat === "fact"
@@ -5973,6 +5978,57 @@ ${this.selectStarLimit("__topValues ORDER BY count DESC", limit)}
       else {
         return `MAX(COALESCE(value, 0))`;
       }
+    }
+  }
+
+  private getAggregateFilterMetricColumn({
+    metric,
+    useDenominator,
+  }: {
+    metric: ExperimentMetricInterface | null;
+    useDenominator?: boolean;
+  }) {
+    // Fact Metrics
+    if (metric && isFactMetric(metric)) {
+      const columnRef = useDenominator ? metric.denominator : metric.numerator;
+
+      if (columnRef?.aggregateFilterColumn) {
+        return columnRef?.aggregateFilterColumn === "$$count"
+            ? `sum(1) over (
+                    partition by user_id 
+                    order by timestamp asc
+                    rows between unbounded preceding and current row
+                  )`
+            : `sum(${columnRef?.aggregateFilterColumn}) over (
+                    partition by user_id 
+                    order by timestamp asc
+                    rows between unbounded preceding and current row
+                  )`
+      }
+    }
+  }
+
+  private getAggregateFilterMetricClause({
+    metric,
+    useDenominator,
+  }: {
+    metric: ExperimentMetricInterface | null;
+    useDenominator?: boolean;
+  }) {
+    // Fact Metrics
+    if (metric && isFactMetric(metric)) {
+      const columnRef = useDenominator ? metric.denominator : metric.numerator;
+
+      const aggregateFilter =
+        getAggregateFilters({
+            columnRef: columnRef,
+            column: `aggregate_filter_metric_value`,
+            ignoreInvalid: true,
+        });
+
+      return aggregateFilter.length > 0 ? 'AND ' + aggregateFilter.join(' AND ') : ""
+    } else {
+      return ""
     }
   }
 
