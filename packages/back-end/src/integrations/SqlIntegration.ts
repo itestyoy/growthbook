@@ -5749,7 +5749,7 @@ ${this.selectStarLimit("__topValues ORDER BY count DESC", limit)}
       SELECT
         ${userIdCol} as ${baseIdType},
         ${cols.value} as value,
-        ${timestampDateTimeColumn} as timestamp,
+        ${timestampDateTimeColumn} as timestamp
         ${aggregateFilterMetricColumn ? ', ' + aggregateFilterMetricColumn + ' as aggregate_filter_metric_value' : ''}
       FROM
         ${
