@@ -129,6 +129,9 @@ export const DEFAULT_CONVERSION_WINDOW_HOURS =
 export const METRIC_REFRESH_FREQUENCY =
   parseInt(process.env.METRIC_REFRESH_FREQUENCY || "") || 24;
 
+export const AUTO_SLICE_UPDATE_FREQUENCY_HOURS =
+  parseInt(process.env.AUTO_SLICE_UPDATE_FREQUENCY_HOURS || "") || 168; // Default: 7 days
+
 export const QUERY_CACHE_TTL_MINS =
   parseInt(process.env.QUERY_CACHE_TTL_MINS || "") || 60;
 
@@ -279,6 +282,8 @@ export const CLICKHOUSE_ADMIN_PASSWORD =
   process.env.CLICKHOUSE_ADMIN_PASSWORD || "";
 export const CLICKHOUSE_DATABASE = process.env.CLICKHOUSE_DATABASE || "";
 export const CLICKHOUSE_MAIN_TABLE = process.env.CLICKHOUSE_MAIN_TABLE || "";
+export const CLICKHOUSE_OVERAGE_TABLE =
+  process.env.CLICKHOUSE_OVERAGE_TABLE || "overage_events";
 export const CLICKHOUSE_DEV_PREFIX =
   process.env.CLICKHOUSE_DEV_PREFIX || "test_";
 

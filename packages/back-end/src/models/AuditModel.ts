@@ -1,7 +1,6 @@
 import mongoose, { FilterQuery, QueryOptions } from "mongoose";
 import uniqid from "uniqid";
-import { AuditInterface } from "back-end/types/audit";
-import { EntityType } from "back-end/src/types/Audit";
+import { AuditInterface, EntityType } from "shared/types/audit";
 import {
   removeMongooseFields,
   ToInterface,
@@ -62,19 +61,17 @@ export async function insertAudit(
  * find all audits by user id and organization
  * @param userId
  * @param organization
- * @param options
  */
-export async function findAuditByUserIdAndOrganization(
+export async function findRecentAuditByUserIdAndOrganization(
   userId: string,
   organization: string,
-  options?: QueryOptions,
-): Promise<AuditInterface[]> {
+): Promise<Omit<AuditInterface, "details">[]> {
   const userAudits = await AuditModel.find({
     "user.id": userId,
     organization,
-    ...options,
   })
-    .limit(100)
+    .select("-details")
+    .limit(10)
     .sort({ dateCreated: -1 });
   const transformed = userAudits.map((doc) => toInterface(doc));
   return transformed;

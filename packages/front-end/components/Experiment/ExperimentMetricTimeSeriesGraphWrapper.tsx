@@ -1,8 +1,8 @@
-import * as Sentry from "@sentry/nextjs";
+import { captureException as sentryCaptureException } from "@sentry/nextjs";
 import { useMemo } from "react";
 import { ErrorBoundary } from "react-error-boundary";
 import { Flex } from "@radix-ui/themes";
-import { DifferenceType, StatsEngine } from "back-end/types/stats";
+import { DifferenceType, StatsEngine } from "shared/types/stats";
 import { ExperimentStatus, MetricTimeSeries } from "shared/validators";
 import { daysBetween, getValidDate } from "shared/dates";
 import { addDays, min } from "date-fns";
@@ -32,6 +32,7 @@ interface ExperimentMetricTimeSeriesGraphWrapperProps {
   pValueAdjustmentEnabled: boolean;
   firstDateToRender: Date;
   sliceId?: string;
+  baselineRow?: number;
 }
 
 export default function ExperimentMetricTimeSeriesGraphWrapperWithErrorBoundary(
@@ -43,7 +44,7 @@ export default function ExperimentMetricTimeSeriesGraphWrapperWithErrorBoundary(
         <Message>Something went wrong while displaying this graph.</Message>
       }
       onError={(error) => {
-        Sentry.captureException(error);
+        sentryCaptureException(error);
       }}
     >
       <ExperimentMetricTimeSeriesGraphWrapper {...props} />
@@ -63,6 +64,7 @@ function ExperimentMetricTimeSeriesGraphWrapper({
   pValueAdjustmentEnabled,
   firstDateToRender,
   sliceId,
+  baselineRow = 0,
 }: ExperimentMetricTimeSeriesGraphWrapperProps) {
   const { getFactTableById } = useDefinitions();
   const pValueThreshold = usePValueThreshold();
@@ -83,6 +85,15 @@ function ExperimentMetricTimeSeriesGraphWrapper({
   const filteredMetricTimeSeries = useMemo(() => {
     return filterInvalidMetricTimeSeries(data?.timeSeries || []);
   }, [data]);
+
+  if (baselineRow !== 0) {
+    return (
+      <Message>
+        Time series is only available when comparing against Control as a
+        baseline.
+      </Message>
+    );
+  }
 
   if (error) {
     return (
