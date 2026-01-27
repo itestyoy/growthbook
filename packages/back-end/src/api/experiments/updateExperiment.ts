@@ -1,4 +1,8 @@
 import { getAllMetricIdsFromExperiment } from "shared/experiments";
+import {
+  ExperimentInterfaceExcludingHoldouts,
+  Variation,
+} from "shared/validators";
 import { UpdateExperimentResponse } from "back-end/types/openapi";
 import { getDataSourceById } from "back-end/src/models/DataSourceModel";
 import {
@@ -14,10 +18,6 @@ import { createApiRequestHandler } from "back-end/src/util/handler";
 import { updateExperimentValidator } from "back-end/src/validators/openapi";
 import { getMetricMap } from "back-end/src/models/MetricModel";
 import { validateVariationIds } from "back-end/src/controllers/experiments";
-import {
-  ExperimentInterfaceExcludingHoldouts,
-  Variation,
-} from "back-end/src/validators/experiments";
 import { validateCustomFields } from "./validation";
 
 export const updateExperiment = createApiRequestHandler(
@@ -105,13 +105,22 @@ export const updateExperiment = createApiRequestHandler(
   }
 
   // Validate that specified metrics exist and belong to the organization
-  const oldMetricIds = getAllMetricIdsFromExperiment(experiment);
-  const newMetricIds = getAllMetricIdsFromExperiment({
-    goalMetrics: req.body.metrics,
-    secondaryMetrics: req.body.secondaryMetrics,
-    guardrailMetrics: req.body.guardrailMetrics,
-    activationMetric: req.body.activationMetric,
-  }).filter((m) => !oldMetricIds.includes(m));
+  const metricGroups = await req.context.models.metricGroups.getAll();
+  const oldMetricIds = getAllMetricIdsFromExperiment(
+    experiment,
+    true,
+    metricGroups,
+  );
+  const newMetricIds = getAllMetricIdsFromExperiment(
+    {
+      goalMetrics: req.body.metrics,
+      secondaryMetrics: req.body.secondaryMetrics,
+      guardrailMetrics: req.body.guardrailMetrics,
+      activationMetric: req.body.activationMetric,
+    },
+    true,
+    metricGroups,
+  ).filter((m) => !oldMetricIds.includes(m));
 
   const map = await getMetricMap(req.context);
 

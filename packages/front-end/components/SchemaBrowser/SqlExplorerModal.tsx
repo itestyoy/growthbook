@@ -12,7 +12,7 @@ import {
   DataVizConfig,
   SavedQuery,
   QueryExecutionResult,
-} from "back-end/src/validators/saved-queries";
+} from "shared/validators";
 import { Box, Flex, IconButton, Text } from "@radix-ui/themes";
 import { getValidDate } from "shared/dates";
 import { isReadOnlySQL, SQL_ROW_LIMIT } from "shared/sql";
@@ -877,6 +877,7 @@ export default function SqlExplorerModal({
                                     ...dataVizConfig,
                                     {
                                       ...config,
+                                      id: undefined, // Generate a new ID once the request hits the backend
                                       title: `${
                                         config.title ||
                                         `Visualization ${index + 1}`

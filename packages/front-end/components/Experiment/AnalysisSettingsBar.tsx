@@ -22,7 +22,7 @@ import {
 import { FaMagnifyingGlassChart } from "react-icons/fa6";
 import { RiBarChartFill } from "react-icons/ri";
 import { MetricGroupInterface } from "back-end/types/metric-groups";
-import { HoldoutInterface } from "back-end/src/routers/holdout/holdout.validators";
+import { HoldoutInterface } from "back-end/src/validators/holdout";
 import { useAuth } from "@/services/auth";
 import { useDefinitions } from "@/services/DefinitionsContext";
 import Switch from "@/ui/Switch";
@@ -507,7 +507,7 @@ export function isOutdated({
   const snapshotMetrics = Array.from(
     new Set(
       expandMetricGroups(
-        getAllMetricIdsFromExperiment(snapshotSettings, false),
+        getAllMetricIdsFromExperiment(snapshotSettings, false, metricGroups),
         metricGroups,
       ),
     ),
@@ -515,7 +515,7 @@ export function isOutdated({
   let experimentMetrics = Array.from(
     new Set(
       expandMetricGroups(
-        getAllMetricIdsFromExperiment(experiment, false),
+        getAllMetricIdsFromExperiment(experiment, false, metricGroups),
         metricGroups,
       ),
     ),
