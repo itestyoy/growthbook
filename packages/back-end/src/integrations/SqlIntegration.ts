@@ -2182,7 +2182,7 @@ export default abstract class SqlIntegration
       ${segment ? `AND s.date <= e.timestamp` : ""}
       ${this.getAggregateFilterMetricClause({metric: activationMetric})}
       GROUP BY
-        e.${baseIdType}
+        e.${baseIdType} 
     )`;
   }
 
