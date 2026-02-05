@@ -48,6 +48,8 @@ You only need to configure `GB_API_KEY` and `GB_EMAIL`.
 
 ### Cursor
 
+[![Install MCP Server](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/en-US/install-mcp?name=growthbook&config=eyJlbnYiOnsiR0JfQVBJX0tFWSI6IllPVVJfQVBJX0tFWSIsIkdCX0VNQUlMIjoiWU9VUl9FTUFJTCIsIkdCX0FQSV9VUkwiOiJZT1VSX0FQSV9VUkwiLCJHQl9BUFBfT1JJR0lOIjoiWU9VUl9BUFBfT1JJR0lOIn0sImNvbW1hbmQiOiJucHggLXkgQGdyb3d0aGJvb2svbWNwQGxhdGVzdCJ9)
+
 1. Open **Cursor Settings** &rarr; **MCP**
 2. Click **Add new global MCP server**
 3. Add an entry for the GrowthBook MCP, following the pattern below:
@@ -240,7 +242,7 @@ In CoPilot Chat, you'll see a tool icon, indicating the server is connected succ
 Claude Code uses command-line commands to add MCP servers. Run the following command in your terminal:
 
 ```bash
-claude mcp add --transport stdio --env GB_API_KEY=YOUR_API_KEY --env GB_API_URL=YOUR_API_URL --env GB_APP_ORIGIN=YOUR_APP_ORIGIN --env GB_EMAIL=YOUR_EMAIL growthbook -- npx -y @growthbook/mcp@latest
+claude mcp add growthbook --transport stdio --env GB_API_KEY=YOUR_API_KEY --env GB_API_URL=YOUR_API_URL --env GB_APP_ORIGIN=YOUR_APP_ORIGIN --env GB_EMAIL=YOUR_EMAIL -- npx -y @growthbook/mcp@latest
 ```
 
 :::tip Command structure
@@ -292,7 +294,7 @@ Claude Desktop ships with its own version of Node, which means it's not required
     2. `full`: Metadata about experiments plus results. Warning: This returns a large payload, which fills up the context window quickly.
     3. `summary`: Presents a high-level summary of experiments and their results, combining experiment metadata, results, and metrics.
 - `get_attributes`: List user attributes tracked in GrowthBook (useful for targeting).
-- `create_experiment`: Creates an A/B test. Optionally, provide a feature ID to link the experiment to a feature flag. Note: this tool calls `get_defaults`, which provides a sampling of previous experiments to help the AI agent create the experiment correctly. For better performance, these defaults are saved to the local file system and periodically updated. 
+- `create_experiment`: Creates an A/B test. Optionally, provide a feature ID to link the experiment to a feature flag. Note: this tool calls `get_defaults`, which provides a sampling of previous experiments to help the AI agent create the experiment correctly. For better performance, these defaults are saved to the local file system and periodically updated.
 - `get_defaults`: Get default values for experiments including hypothesis, description, datasource, and assignment query. (Runs automatically when the create experiment tool is called.)
 - `create_defaults`: Set custom default values for experiments that will be used when creating new experiments.
 - `clear_user_defaults`: Clear user-defined defaults and revert to automatic defaults.
