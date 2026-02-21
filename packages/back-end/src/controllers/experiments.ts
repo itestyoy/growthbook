@@ -185,7 +185,12 @@ export async function getExperiments(
 experiment based on the id, and the suggested results, winner and releasedVariationId*/
 export async function postAIExperimentAnalysis(
   req: AuthRequest<
-    { results: string; winner: number; releasedVariationId: string },
+    {
+      results: string;
+      winner: number;
+      releasedVariationId: string;
+      temperature?: number;
+    },
     { id: string }
   >,
   res: Response<{
@@ -199,7 +204,13 @@ export async function postAIExperimentAnalysis(
 ) {
   const context = getContextFromReq(req);
   const { id } = req.params;
-  const { results, winner, releasedVariationId } = req.body;
+  const {
+    results,
+    winner,
+    releasedVariationId,
+    temperature: reqTemperature,
+  } = req.body;
+  const temperature = reqTemperature ?? 0.1;
 
   const experiment = await getExperimentById(context, id);
   if (!experiment) {
@@ -300,13 +311,15 @@ export async function postAIExperimentAnalysis(
     "\n- Confidence intervals: A range of values that likely contains the true effect size." +
     "\n- Statistical power: The probability of detecting a true effect." +
     "\n- Sample Ratio Mismatch (SRM): Indicates whether traffic was evenly split among variations." +
-    "\n- Chance to Win: The probability that a variation is better than others." +
+    "\n- Chance to Win (bayesian only): The probability that a variation is better than others." +
+    "\n- P-Value (frequentist only): The probability that the null hypothesis is true." +
     // Metric types
     "\nMetrics can be of the following types:" +
-    "\n- Binomial Metrics: Represent yes/no outcomes (e.g., conversion rates). The value is the proportion of users who converted (e.g., 10% means 10 out of 100 users converted)." +
-    "\n- Count Metrics: Represent the total count of events per user (e.g., pages viewed per user). The value is the average count per user." +
-    "\n- Duration Metrics: Represent the total time spent per user (e.g., time on site). The value is the average duration per user, typically in seconds or minutes." +
-    "\n- Revenue Metrics: Represent the total revenue generated per user. The value is in the local currency, and not a percent.  (e.g. For instance 6.58 means the average revenue per user was $6.58 on average)." +
+    "\n- Binomial/Proportion Metrics: Represent yes/no outcomes (e.g., conversion rates). The value is the proportion of users who converted (e.g., 10% means 10 out of 100 users converted)." +
+    "\n- Count/Mean Metrics: Represent the total count of events per user (e.g., pages viewed per user). The value is the average count per user." +
+    "\n- Duration/Mean Metrics: Represent the total time spent per user (e.g., time on site). The value is the average duration per user, typically in seconds or minutes." +
+    "\n- Revenue/Mean Metrics: Represent the total revenue generated per user. The value is in the local currency, and not a percent.  (e.g. For instance 6.58 means the average revenue per user was $6.58 on average)." +
+    "\n- Ratio Metrics: Represent the ratio of two numeric values among experiment users." +
     // Statistical results
     "\n- Statistical results for metrics include: Conversion Rate (CR)" +
     "\n- Statistical results for metrics include: Value: Represents the total value of the metric across all users who saw the variation." +
@@ -367,7 +380,7 @@ export async function postAIExperimentAnalysis(
     prompt: prompt,
     type,
     isDefaultPrompt,
-    temperature: 0.1,
+    temperature,
     overrideModel,
   });
 
@@ -1061,7 +1074,11 @@ export async function postExperiments(
   }
 
   let result:
-    | { metricIds: string[]; datasource: DataSourceInterface | null }
+    | {
+        metricIds: string[];
+        datasource: DataSourceInterface | null;
+        invalidMetricIds: string[];
+      }
     | undefined;
 
   try {
@@ -1074,10 +1091,30 @@ export async function postExperiments(
     return;
   }
 
-  const { metricIds, datasource } = result;
+  const { metricIds, datasource, invalidMetricIds } = result;
 
   const experimentType = data.type ?? "standard";
   const holdoutId = data.holdoutId;
+
+  // TODO: Added as a hotfix. Remove when issue #5316 is fixed.
+  // Filter out invalid metric ids from the data
+  if (invalidMetricIds.length) {
+    data.goalMetrics = data.goalMetrics?.filter(
+      (id) => !invalidMetricIds.includes(id),
+    );
+    data.secondaryMetrics = data.secondaryMetrics?.filter(
+      (id) => !invalidMetricIds.includes(id),
+    );
+    data.guardrailMetrics = data.guardrailMetrics?.filter(
+      (id) => !invalidMetricIds.includes(id),
+    );
+    if (
+      data.activationMetric &&
+      invalidMetricIds.includes(data.activationMetric)
+    ) {
+      data.activationMetric = "";
+    }
+  }
 
   const obj: Omit<ExperimentInterface, "id" | "uid"> = {
     organization: data.organization,
@@ -1156,6 +1193,15 @@ export async function postExperiments(
   const { settings } = getScopedSettings({
     organization: org,
   });
+
+  // Validate attributionModel + lookbackOverride consistency
+  if (obj.attributionModel === "lookbackOverride" && !obj.lookbackOverride) {
+    return res.status(400).json({
+      status: 400,
+      message:
+        "lookbackOverride is required when attributionModel is 'lookbackOverride'",
+    });
+  }
 
   try {
     validateVariationIds(obj.variations);
@@ -1361,6 +1407,8 @@ export async function postExperiment(
 
   const metricMap = await getMetricMap(context);
 
+  const invalidMetricIds: string[] = [];
+
   if (newMetricIds.length) {
     for (let i = 0; i < newMetricIds.length; i++) {
       const metric = metricMap.get(newMetricIds[i]);
@@ -1393,12 +1441,34 @@ export async function postExperiment(
           }
         } else {
           // new metric that's not recognized...
-          res.status(403).json({
-            status: 403,
-            message: "Unknown metric: " + newMetricIds[i],
-          });
-          return;
+          invalidMetricIds.push(newMetricIds[i]);
+          // TODO: Commented out as a hotfix. Remove when issue #5316 is fixed.
+          // res.status(403).json({
+          //   status: 403,
+          //   message: "Unknown metric: " + newMetricIds[i],
+          // });
+          // return;
         }
+      }
+    }
+
+    // TODO: Added as a hotfix. Remove when issue #5316 is fixed.
+    // Filter out invalid metric ids from the data
+    if (invalidMetricIds.length) {
+      data.goalMetrics = data.goalMetrics?.filter(
+        (id) => !invalidMetricIds.includes(id),
+      );
+      data.secondaryMetrics = data.secondaryMetrics?.filter(
+        (id) => !invalidMetricIds.includes(id),
+      );
+      data.guardrailMetrics = data.guardrailMetrics?.filter(
+        (id) => !invalidMetricIds.includes(id),
+      );
+      if (
+        data.activationMetric &&
+        invalidMetricIds.includes(data.activationMetric)
+      ) {
+        data.activationMetric = "";
       }
     }
   }
@@ -1477,6 +1547,7 @@ export async function postExperiment(
     "secondaryMetrics",
     "guardrailMetrics",
     "metricOverrides",
+    "lookbackOverride",
     "decisionFrameworkSettings",
     "variations",
     "status",
@@ -1527,6 +1598,7 @@ export async function postExperiment(
       key === "secondaryMetrics" ||
       key === "guardrailMetrics" ||
       key === "metricOverrides" ||
+      key === "lookbackOverride" ||
       key === "variations" ||
       key === "customFields" ||
       key === "customMetricSlices"
@@ -1540,6 +1612,32 @@ export async function postExperiment(
       (changes as any)[key] = data[key];
     }
   });
+
+  // Coerce lookbackOverride date value when type is "date"
+  if (changes.lookbackOverride?.type === "date") {
+    changes.lookbackOverride = {
+      type: "date",
+      value: getValidDate(changes.lookbackOverride.value),
+    };
+  }
+
+  // Validate attributionModel + lookbackOverride consistency
+  {
+    const effectiveAttrModel =
+      changes.attributionModel ?? experiment.attributionModel;
+    const effectiveLookback =
+      "lookbackOverride" in changes
+        ? changes.lookbackOverride
+        : experiment.lookbackOverride;
+    if (effectiveAttrModel === "lookbackOverride" && !effectiveLookback) {
+      res.status(400).json({
+        status: 400,
+        message:
+          "lookbackOverride is required when attributionModel is 'lookbackOverride'",
+      });
+      return;
+    }
+  }
 
   // If changing phase start/end dates (from "Configure Analysis" modal)
   if (
@@ -1868,7 +1966,6 @@ export async function postExperimentStatus(
       status: ExperimentStatus;
       reason: string;
       dateEnded: string;
-      holdoutRunningStatus?: "running" | "analysis-period";
     },
     { id: string }
   >,
@@ -1877,7 +1974,7 @@ export async function postExperimentStatus(
   const context = getContextFromReq(req);
   const { org } = context;
   const { id } = req.params;
-  const { status, reason, dateEnded, holdoutRunningStatus } = req.body;
+  const { status, reason, dateEnded } = req.body;
 
   const changes: Changeset = {};
 
@@ -1887,6 +1984,14 @@ export async function postExperimentStatus(
   }
   if (experiment.organization !== org.id) {
     throw new Error("You do not have access to this experiment");
+  }
+  if (experiment.type === "holdout") {
+    res.status(400).json({
+      status: 400,
+      message:
+        "Cannot edit the status of a holdout through this endpoint. Use the /holdout/:id/edit-status endpoint instead.",
+    });
+    return;
   }
 
   if (!context.permissions.canUpdateExperiment(experiment, changes)) {
@@ -1924,12 +2029,6 @@ export async function postExperimentStatus(
     phases?.length > 0 &&
     !phases[lastIndex].dateEnded
   ) {
-    if (experiment.type === "holdout") {
-      phases[0] = {
-        ...phases[0],
-        dateEnded: dateEnded ? getValidDate(dateEnded + ":00Z") : new Date(),
-      };
-    }
     phases[lastIndex] = {
       ...phases[lastIndex],
       reason,
@@ -1957,24 +2056,10 @@ export async function postExperimentStatus(
     phases?.length > 0
   ) {
     const clonedPhase = { ...phases[lastIndex] };
-    const clonedFirstPhase = { ...phases[0] };
-    if (experiment.type === "holdout") {
-      // when setting moving back to running or draft remove the end date of both phases
-      delete clonedFirstPhase.dateEnded;
-      delete clonedPhase.dateEnded;
-      // reset the analysis phase if new status is set to "analysis-period"
-      if (phases.length > 1 && holdoutRunningStatus === "analysis-period") {
-        clonedPhase.lookbackStartDate = new Date();
-        phases[lastIndex] = clonedPhase;
-        // delete analysis phase if new status is set to "running"
-      } else {
-        phases.pop();
-      }
-      phases[0] = clonedFirstPhase;
-    } else {
-      delete clonedPhase.dateEnded;
-      phases[lastIndex] = clonedPhase;
-    }
+
+    delete clonedPhase.dateEnded;
+    phases[lastIndex] = clonedPhase;
+
     changes.phases = phases;
 
     // Bandit-specific changes
@@ -2074,6 +2159,15 @@ export async function postExperimentStop(
     return;
   }
 
+  if (experiment.type === "holdout") {
+    res.status(400).json({
+      status: 400,
+      message:
+        "Cannot stop a holdout through this endpoint. Use the /holdout/:id/edit-status endpoint instead.",
+    });
+    return;
+  }
+
   if (!context.permissions.canUpdateExperiment(experiment, req.body)) {
     context.permissions.throwPermissionError();
   }
@@ -2098,12 +2192,6 @@ export async function postExperimentStop(
   const phases = [...experiment.phases];
   // Already has phases
   if (phases.length) {
-    if (experiment.type === "holdout") {
-      phases[0] = {
-        ...phases[0],
-        dateEnded: dateEnded ? getValidDate(dateEnded + ":00Z") : new Date(),
-      };
-    }
     phases[phases.length - 1] = {
       ...phases[phases.length - 1],
       dateEnded: dateEnded ? getValidDate(dateEnded + ":00Z") : new Date(),

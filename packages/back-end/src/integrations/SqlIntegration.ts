@@ -404,6 +404,9 @@ export default abstract class SqlIntegration
   hasCountDistinctHLL(): boolean {
     return false;
   }
+  supportsLimitZeroColumnValidation(): boolean {
+    return false;
+  }
   // eslint-disable-next-line
   hllAggregate(col: string): string {
     throw new Error(
@@ -1006,7 +1009,7 @@ export default abstract class SqlIntegration
           -- Get aggregated metric per user by day
           SELECT
           ${populationSQL ? "p" : "f"}.${baseIdType} AS ${baseIdType}
-            , ${this.dateTrunc("timestamp")} AS date
+            , ${this.dateTrunc("f.timestamp")} AS date
             , ${metricData.numeratorAggFns.fullAggregationFunction(`f.${metricData.alias}_value`)} AS value
             , ${metricData.numeratorAggFns.partialAggregationFunction(`f.${metricData.alias}_value`)} AS value_for_reaggregation
                   ${
@@ -1529,11 +1532,13 @@ export default abstract class SqlIntegration
     testDays?: number,
     templateVariables?: TemplateVariables,
   ): string {
+    // Use LIMIT 0 for datasources that support column metadata without data
+    const limit = this.supportsLimitZeroColumnValidation() ? 0 : 1;
     return this.getTestQuery({
       query,
       templateVariables,
       testDays: testDays ?? DEFAULT_TEST_QUERY_DAYS,
-      limit: 1,
+      limit,
     });
   }
 
@@ -2056,7 +2061,8 @@ export default abstract class SqlIntegration
     // BQ datetime cast for SELECT statements (do not use for where)
     const timestampDateTimeColumn = this.castUserDateCol(timestampColumn);
     const overrideConversionWindows =
-      settings.attributionModel === "experimentDuration";
+      settings.attributionModel === "experimentDuration" ||
+      settings.attributionModel === "lookbackOverride";
 
     return `
     ${params.includeIdJoins ? idJoinSQL : ""}
@@ -2737,7 +2743,8 @@ export default abstract class SqlIntegration
       : 0;
 
     const overrideConversionWindows =
-      settings.attributionModel === "experimentDuration";
+      settings.attributionModel === "experimentDuration" ||
+      settings.attributionModel === "lookbackOverride";
 
     // Get capping settings and final coalesce statement
     const isPercentileCapped = isPercentileCappedMetric(metric);
@@ -3853,7 +3860,8 @@ export default abstract class SqlIntegration
       : 0;
 
     const overrideConversionWindows =
-      settings.attributionModel === "experimentDuration";
+      settings.attributionModel === "experimentDuration" ||
+      settings.attributionModel === "lookbackOverride";
 
     // Get capping settings and final coalesce statement
     const isPercentileCapped = isPercentileCappedMetric(metric);
@@ -4473,7 +4481,7 @@ export default abstract class SqlIntegration
     FROM 
       __banditPeriodStatistics
     GROUP BY
-      ${dimensionCols.map((d) => `${d.alias}`).join(" AND ")}
+      ${dimensionCols.map((d) => `${d.alias}`).join(", ")}
   ),
   __banditPeriodWeights AS (
     SELECT
