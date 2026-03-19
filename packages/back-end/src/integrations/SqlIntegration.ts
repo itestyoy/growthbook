@@ -43,6 +43,7 @@ import {
   format,
   isMultiStatementSQL,
   SQL_ROW_LIMIT,
+  buildMinimalOrCondition,
 } from "shared/sql";
 import {
   PhaseSQLVar,
@@ -5787,10 +5788,7 @@ ORDER BY column_name, count DESC
     // to filter to rows that match a metric to improve query performance.
     // We AND together each metric filters, before OR together all of
     // the different metrics filters
-    const filterWhere: Set<string> = new Set();
-
-    // We only do this if all metrics have at least one filter
-    let numberOfNumeratorsOrDenominatorsWithoutFilters = 0;
+    const allMetricFilters: string[][] = [];
 
     metricsWithIndices.forEach((metricWithIndex) => {
       const m = metricWithIndex.metric;
@@ -5824,12 +5822,7 @@ ORDER BY column_name, count DESC
         metricCols.push(`-- ${m.name}
         ${column} as m${index}_value`);
 
-        if (!filters.length) {
-          numberOfNumeratorsOrDenominatorsWithoutFilters++;
-        }
-        if (addFiltersToWhere && filters.length) {
-          filterWhere.add(`(${filters.join("\n AND ")})`);
-        }
+        allMetricFilters.push(filters);
       }
 
       // Add denominator column if there is one
@@ -5864,22 +5857,15 @@ ORDER BY column_name, count DESC
         metricCols.push(`-- ${m.name} (denominator)
         ${column} as m${index}_denominator`);
 
-        if (!filters.length) {
-          numberOfNumeratorsOrDenominatorsWithoutFilters++;
-        }
-
-        if (addFiltersToWhere && filters.length) {
-          filterWhere.add(`(${filters.join(" AND ")})`);
-        }
+        allMetricFilters.push(filters);
       }
     });
 
-    // only add filters if all metrics have at least one filter
-    if (
-      filterWhere.size > 0 &&
-      numberOfNumeratorsOrDenominatorsWithoutFilters === 0
-    ) {
-      where.push("(" + Array.from(filterWhere).join(" OR ") + ")");
+    if (addFiltersToWhere) {
+      const filters = buildMinimalOrCondition(allMetricFilters);
+      if (filters) {
+        where.push(filters);
+      }
     }
 
     return compileSqlTemplate(
