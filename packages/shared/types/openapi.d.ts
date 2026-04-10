@@ -21708,6 +21708,9 @@ export interface operations {
   deleteCustomField: {
     /** Delete a single customField */
     parameters: {
+      query: {
+        index?: string;
+      };
       path: {
         id: string;
       };
