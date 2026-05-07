@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { v4 as uuidv4 } from "uuid";
 import { PermissionError } from "shared/util";
+import { apiRampScheduleInterface } from "shared/validators";
 import {
   advanceUntilBlocked,
   approveAndPublishStep,
@@ -13,16 +14,33 @@ import {
   rollbackToStep,
 } from "back-end/src/services/rampSchedule";
 import { getFeature } from "back-end/src/models/FeatureModel";
+import { rampScheduleToApiInterface } from "back-end/src/models/RampScheduleModel";
 import { createApiRequestHandler } from "back-end/src/util/handler";
+import {
+  rampTargetsEquivalent,
+  resolveRampTarget,
+} from "back-end/src/util/flattenRules";
 
 const actionParamsSchema = z.object({ id: z.string() });
 
 const attributionBodySchema = z.object({});
 
+const rampScheduleResponse = z.object({
+  rampSchedule: apiRampScheduleInterface,
+});
+
 // POST /ramp-schedules/:id/actions/start
 export const startRampSchedule = createApiRequestHandler({
   paramsSchema: actionParamsSchema,
-  bodySchema: attributionBodySchema,
+  bodySchema: z.never(),
+  responseSchema: rampScheduleResponse,
+  method: "post" as const,
+  path: "/ramp-schedules/:id/actions/start",
+  operationId: "startRampSchedule",
+  summary: "Start a ramp schedule",
+  description:
+    "Transitions the schedule from `ready` to `running` and processes the first\nstep immediately if eligible.\n",
+  tags: ["ramp-schedules"],
 })(async (req) => {
   const schedule = await req.context.models.rampSchedules.getById(
     req.params.id,
@@ -68,13 +86,21 @@ export const startRampSchedule = createApiRequestHandler({
     },
   );
 
-  return { rampSchedule: current };
+  return { rampSchedule: rampScheduleToApiInterface(current) };
 });
 
 // POST /ramp-schedules/:id/actions/pause
 export const pauseRampSchedule = createApiRequestHandler({
   paramsSchema: actionParamsSchema,
-  bodySchema: attributionBodySchema,
+  bodySchema: z.never(),
+  responseSchema: rampScheduleResponse,
+  method: "post" as const,
+  path: "/ramp-schedules/:id/actions/pause",
+  operationId: "pauseRampSchedule",
+  summary: "Pause a ramp schedule",
+  description:
+    "Pauses a `running` or `pending-approval` schedule. The schedule can be\nresumed from the same position with the `/actions/resume` endpoint.\n",
+  tags: ["ramp-schedules"],
 })(async (req) => {
   const schedule = await req.context.models.rampSchedules.getById(
     req.params.id,
@@ -91,13 +117,21 @@ export const pauseRampSchedule = createApiRequestHandler({
     { status: "paused", pausedAt: new Date(), nextProcessAt: null },
   );
 
-  return { rampSchedule: updated };
+  return { rampSchedule: rampScheduleToApiInterface(updated) };
 });
 
 // POST /ramp-schedules/:id/actions/resume
 export const resumeRampSchedule = createApiRequestHandler({
   paramsSchema: actionParamsSchema,
-  bodySchema: attributionBodySchema,
+  bodySchema: z.never(),
+  responseSchema: rampScheduleResponse,
+  method: "post" as const,
+  path: "/ramp-schedules/:id/actions/resume",
+  operationId: "resumeRampSchedule",
+  summary: "Resume a paused ramp schedule",
+  description:
+    "Resumes a `paused` schedule. Adjusts timing anchors to account for the\npause duration so step intervals continue from where they left off.\n",
+  tags: ["ramp-schedules"],
 })(async (req) => {
   const schedule = await req.context.models.rampSchedules.getById(
     req.params.id,
@@ -174,15 +208,27 @@ export const resumeRampSchedule = createApiRequestHandler({
       (await req.context.models.rampSchedules.getById(schedule.id)) ?? updated;
   }
 
-  return { rampSchedule: updated };
+  return { rampSchedule: rampScheduleToApiInterface(updated) };
 });
 
 // POST /ramp-schedules/:id/actions/jump
 export const jumpRampSchedule = createApiRequestHandler({
   paramsSchema: actionParamsSchema,
   bodySchema: attributionBodySchema.extend({
-    targetStepIndex: z.number().int().min(-1),
+    targetStepIndex: z
+      .number()
+      .int()
+      .min(-1)
+      .describe("Zero-based index of the step to jump to; -1 = pre-start"),
   }),
+  responseSchema: rampScheduleResponse,
+  method: "post" as const,
+  path: "/ramp-schedules/:id/actions/jump",
+  operationId: "jumpRampSchedule",
+  summary: "Jump to a specific step",
+  description:
+    "Moves the schedule directly to `targetStepIndex` (forward or backward) and\npauses. Use `-1` to jump to the pre-start position without rolling back rule\npatches.\n",
+  tags: ["ramp-schedules"],
 })(async (req) => {
   const schedule = await req.context.models.rampSchedules.getById(
     req.params.id,
@@ -245,13 +291,21 @@ export const jumpRampSchedule = createApiRequestHandler({
     },
   });
 
-  return { rampSchedule: updated };
+  return { rampSchedule: rampScheduleToApiInterface(updated) };
 });
 
 // POST /ramp-schedules/:id/actions/complete
 export const completeRampSchedule = createApiRequestHandler({
   paramsSchema: actionParamsSchema,
-  bodySchema: attributionBodySchema,
+  bodySchema: z.never(),
+  responseSchema: rampScheduleResponse,
+  method: "post" as const,
+  path: "/ramp-schedules/:id/actions/complete",
+  operationId: "completeRampSchedule",
+  summary: "Complete a ramp schedule immediately",
+  description:
+    "Applies end actions and marks the schedule as `completed`, regardless of\nhow many steps remain.\n",
+  tags: ["ramp-schedules"],
 })(async (req) => {
   const schedule = await req.context.models.rampSchedules.getById(
     req.params.id,
@@ -265,12 +319,20 @@ export const completeRampSchedule = createApiRequestHandler({
 
   const completed = await completeRollout(req.context, schedule);
 
-  return { rampSchedule: completed };
+  return { rampSchedule: rampScheduleToApiInterface(completed) };
 });
 
 export const approveStepRampSchedule = createApiRequestHandler({
   paramsSchema: actionParamsSchema,
-  bodySchema: attributionBodySchema,
+  bodySchema: z.never(),
+  responseSchema: rampScheduleResponse,
+  method: "post" as const,
+  path: "/ramp-schedules/:id/actions/approve-step",
+  operationId: "approveStepRampSchedule",
+  summary: "Approve the current pending-approval step",
+  description:
+    "Approves the current step on a schedule in `pending-approval` status and\nadvances to the next step. Requires the caller to have feature review\npermissions for the associated feature.\n",
+  tags: ["ramp-schedules"],
 })(async (req) => {
   const schedule = await req.context.models.rampSchedules.getById(
     req.params.id,
@@ -294,13 +356,21 @@ export const approveStepRampSchedule = createApiRequestHandler({
   const updated =
     (await req.context.models.rampSchedules.getById(schedule.id)) ?? schedule;
 
-  return { rampSchedule: updated };
+  return { rampSchedule: rampScheduleToApiInterface(updated) };
 });
 
 // POST /ramp-schedules/:id/actions/rollback — lands in "paused" so it can be restarted
 export const rollbackRampSchedule = createApiRequestHandler({
   paramsSchema: actionParamsSchema,
-  bodySchema: attributionBodySchema,
+  bodySchema: z.never(),
+  responseSchema: rampScheduleResponse,
+  method: "post" as const,
+  path: "/ramp-schedules/:id/actions/rollback",
+  operationId: "rollbackRampSchedule",
+  summary: "Roll back a ramp schedule",
+  description:
+    "Rolls back to the starting position and lands in `paused` status so the\nschedule can be restarted with `/actions/start` or `/actions/resume`.\n",
+  tags: ["ramp-schedules"],
 })(async (req) => {
   const schedule = await req.context.models.rampSchedules.getById(
     req.params.id,
@@ -322,17 +392,31 @@ export const rollbackRampSchedule = createApiRequestHandler({
     ...(isTerminal && { startedAt: null, phaseStartedAt: null }),
   });
 
-  return { rampSchedule: updated };
+  return { rampSchedule: rampScheduleToApiInterface(updated) };
 });
 
-// POST /ramp-schedules/:id/actions/add-target — enforces 1:1 [ruleId, environment] per schedule
+// POST /ramp-schedules/:id/actions/add-target — enforces one schedule per rule
 export const addTargetRampSchedule = createApiRequestHandler({
   paramsSchema: actionParamsSchema,
   bodySchema: z.object({
     featureId: z.string(),
     ruleId: z.string(),
-    environment: z.string(),
+    environment: z
+      .string()
+      .optional()
+      .meta({ deprecated: true })
+      .describe(
+        "Deprecated pre-v2 disambiguator; ignored on v2 rules where `rule.id` is uniquely sufficient.",
+      ),
   }),
+  responseSchema: rampScheduleResponse,
+  method: "post" as const,
+  path: "/ramp-schedules/:id/actions/add-target",
+  operationId: "addTargetRampSchedule",
+  summary: "Add a target rule to a ramp schedule",
+  description:
+    "Attaches an additional feature rule to this ramp schedule. The `ruleId`\nmust identify a rule that is already published and must not already be\ncontrolled by another schedule. `environment` is accepted for backward\ncompatibility with pre-v2 ramps but is deprecated and no longer required.\n",
+  tags: ["ramp-schedules"],
 })(async (req) => {
   const schedule = await req.context.models.rampSchedules.getById(
     req.params.id,
@@ -340,25 +424,29 @@ export const addTargetRampSchedule = createApiRequestHandler({
   if (!schedule) throw new Error("Ramp schedule not found");
 
   const { featureId, ruleId, environment } = req.body;
+  const envSuffix = environment ? ` in environment '${environment}'` : "";
 
   const feature = await getFeature(req.context, featureId);
   if (!feature) throw new Error(`Feature '${featureId}' not found`);
-  const envRules = feature.environmentSettings?.[environment]?.rules ?? [];
-  if (!envRules.find((r) => r.id === ruleId)) {
+  const rule = resolveRampTarget(
+    { ruleId, environment: environment ?? null },
+    feature.rules ?? [],
+  );
+  if (!rule) {
     throw new Error(
-      `Rule '${ruleId}' not found in environment '${environment}'. ` +
+      `Rule '${ruleId}' not found${envSuffix}. ` +
         `The rule must be published before attaching a ramp schedule.`,
     );
   }
 
   const conflicting = await req.context.models.rampSchedules.findByTargetRule(
     ruleId,
-    environment,
+    environment ?? undefined,
   );
   const conflict = conflicting.find((s) => s.id !== schedule.id);
   if (conflict) {
     throw new Error(
-      `Schedule '${conflict.id}' already controls rule '${ruleId}' in environment '${environment}'.`,
+      `Schedule '${conflict.id}' already controls rule '${ruleId}'${envSuffix}.`,
     );
   }
 
@@ -367,7 +455,10 @@ export const addTargetRampSchedule = createApiRequestHandler({
     entityType: "feature" as const,
     entityId: featureId,
     ruleId,
-    environment,
+    // `environment` is deliberately omitted on new targets. Post-v2 `rule.id`
+    // is uniquely sufficient; env is a deprecated pre-v2 disambiguator. The
+    // resolver and DB-side lookup still honor stored `environment` for
+    // legacy targets. See `rampTarget` in shared/validators.
     status: "active" as const,
   };
 
@@ -388,7 +479,7 @@ export const addTargetRampSchedule = createApiRequestHandler({
     },
   );
 
-  return { rampSchedule: updated };
+  return { rampSchedule: rampScheduleToApiInterface(updated) };
 });
 
 // POST /ramp-schedules/:id/actions/eject-target — deletes schedule if last target removed
@@ -396,13 +487,35 @@ export const ejectTargetRampSchedule = createApiRequestHandler({
   paramsSchema: actionParamsSchema,
   bodySchema: z
     .object({
-      targetId: z.string().optional(),
-      ruleId: z.string().optional(),
-      environment: z.string().optional(),
+      targetId: z
+        .string()
+        .optional()
+        .describe("Target ID (from the targets array)"),
+      ruleId: z
+        .string()
+        .optional()
+        .describe("Rule ID — use as an alternative to targetId"),
+      environment: z
+        .string()
+        .optional()
+        .meta({ deprecated: true })
+        .describe(
+          "Deprecated pre-v2 disambiguator. Optional when used with ruleId; omit on v2 ramps.",
+        ),
     })
-    .refine((b) => b.targetId || (b.ruleId && b.environment), {
-      message: "Provide either targetId or both ruleId and environment",
+    .refine((b) => b.targetId || b.ruleId, {
+      message: "Provide either targetId or ruleId",
     }),
+  responseSchema: z
+    .object({ rampSchedule: apiRampScheduleInterface })
+    .or(z.object({ deleted: z.boolean(), rampScheduleId: z.string() })),
+  method: "post" as const,
+  path: "/ramp-schedules/:id/actions/eject-target",
+  operationId: "ejectTargetRampSchedule",
+  summary: "Remove a target rule from a ramp schedule",
+  description:
+    "Detaches a target rule from this ramp schedule. Identify the target either\nby its `targetId` or by the `[ruleId, environment]` pair.\n\nIf this is the last target on the schedule, the schedule is deleted entirely\nand the response contains `deleted: true` instead of `rampSchedule`.\n",
+  tags: ["ramp-schedules"],
 })(async (req) => {
   const schedule = await req.context.models.rampSchedules.getById(
     req.params.id,
@@ -413,7 +526,13 @@ export const ejectTargetRampSchedule = createApiRequestHandler({
 
   const remaining = schedule.targets.filter((t) => {
     if (targetId) return t.id !== targetId;
-    return !(t.ruleId === ruleId && t.environment === environment);
+    // Rule-id addressing: match via stem+env equivalence so pre-migration
+    // targets (stored as bare id + env) and post-migration suffixed ids both
+    // resolve to the correct target.
+    return !rampTargetsEquivalent(t, {
+      ruleId,
+      environment: environment ?? null,
+    });
   });
 
   if (remaining.length === schedule.targets.length) {
@@ -430,5 +549,5 @@ export const ejectTargetRampSchedule = createApiRequestHandler({
     { targets: remaining },
   );
 
-  return { rampSchedule: updated };
+  return { rampSchedule: rampScheduleToApiInterface(updated) };
 });

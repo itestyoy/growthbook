@@ -1,5 +1,5 @@
 import { FeatureInterface } from "shared/types/feature";
-import { useState, useMemo, useRef } from "react";
+import { useState, useMemo, useRef, useCallback } from "react";
 import { RampScheduleInterface } from "shared/validators";
 import { FeatureRevisionInterface } from "shared/types/feature-revision";
 import {
@@ -12,7 +12,10 @@ import {
   getReviewSetting,
 } from "shared/util";
 import { useForm } from "react-hook-form";
-import { EventUserLoggedIn } from "shared/types/events/event-types";
+import {
+  EventUserLoggedIn,
+  EventUserApiKey,
+} from "shared/types/events/event-types";
 import { ExperimentInterfaceStringDates } from "shared/types/experiment";
 import { FaArrowLeft } from "react-icons/fa";
 import { Flex } from "@radix-ui/themes";
@@ -41,7 +44,7 @@ import HelperText from "@/ui/HelperText";
 import { logBadgeColor } from "@/components/Features/FeatureDiffRenders";
 import RadioGroup from "@/ui/RadioGroup";
 import Callout from "@/ui/Callout";
-import { PreLaunchChecklistFeatureExpRule } from "@/components/Experiment/PreLaunchChecklist";
+import { PreLaunchChecklistForDraft } from "@/components/Experiment/PreLaunchChecklist";
 import Checkbox from "@/ui/Checkbox";
 import { COMPACT_DIFF_STYLES } from "@/components/AuditHistoryExplorer/CompareAuditEventsUtils";
 export interface Props {
@@ -82,7 +85,10 @@ export default function RequestReviewModal({
   const isPendingReview =
     revision?.status === "pending-review" ||
     revision?.status === "changes-requested";
-  const createdBy = revision?.createdBy as EventUserLoggedIn;
+  const createdBy = revision?.createdBy as
+    | EventUserLoggedIn
+    | EventUserApiKey
+    | undefined;
   const requireReviews = organization?.settings?.requireReviews;
   const reviewSetting = Array.isArray(requireReviews)
     ? getReviewSetting(requireReviews, feature)
@@ -90,7 +96,7 @@ export default function RequestReviewModal({
   const isBlockedContributor =
     reviewSetting?.blockSelfApproval &&
     (revision?.contributors ?? []).some(
-      (c) => c?.type === "dashboard" && c.id === user?.id,
+      (c) => c != null && "id" in c && c.id === user?.id,
     );
   const canReview =
     isPendingReview &&
@@ -117,16 +123,35 @@ export default function RequestReviewModal({
 
   const [comment, setComment] = useState("");
 
-  const { experimentData } = useFeatureExperimentChecklists({
+  const { experiments } = useFeatureExperimentChecklists({
     feature,
     revision,
     experimentsMap,
   });
 
   const [selectedExperiments, setSelectedExperiments] = useState(
-    new Set(experimentData.map((e) => e.experiment.id)),
+    new Set(experiments.map((e) => e.id)),
   );
   const [experimentsStep, setExperimentsStep] = useState(false);
+
+  // Aggregates per-experiment checklist state from child components.
+  // Cleared when entering/leaving the experiments step to avoid stale entries
+  // from previously shown/unchecked experiments.
+  const checklistStateRef = useRef<
+    Map<string, { failedRequired: boolean; loading: boolean }>
+  >(new Map());
+  const [checklistBlocked, setChecklistBlocked] = useState(false);
+  const handleChecklistReady = useCallback(
+    (expId: string, failedRequired: boolean, loading: boolean) => {
+      checklistStateRef.current.set(expId, { failedRequired, loading });
+      setChecklistBlocked(
+        [...checklistStateRef.current.values()].some(
+          (v) => v.failedRequired || v.loading,
+        ),
+      );
+    },
+    [],
+  );
 
   const currentRevisionData = featureToFeatureRevisionDiffInput(feature);
   const draftDiffInput = mergeResult?.success
@@ -143,11 +168,8 @@ export default function RequestReviewModal({
     [resultDiffs],
   );
 
-  let submitEnabled = true;
-  if (experimentsStep && experimentData.some((d) => d.failedRequired)) {
-    submitEnabled = false;
-  }
-  // If we're publishing experiments, next step is to review pre-launch checklists
+  // adminPublish bypasses both the approval requirement and the checklist gate.
+  const submitEnabled = !(experimentsStep && checklistBlocked && !adminPublish);
   const hasNextStep =
     approved && selectedExperiments.size > 0 && !experimentsStep;
 
@@ -161,6 +183,8 @@ export default function RequestReviewModal({
   });
   const submitButton = async () => {
     if (hasNextStep) {
+      checklistStateRef.current.clear();
+      setChecklistBlocked(false);
       setExperimentsStep(true);
       return;
     }
@@ -352,6 +376,8 @@ export default function RequestReviewModal({
             <Button
               color="link"
               onClick={() => {
+                checklistStateRef.current.clear();
+                setChecklistBlocked(false);
                 setExperimentsStep(false);
               }}
             >
@@ -391,16 +417,24 @@ export default function RequestReviewModal({
                 <Flex align="center" gap="2" wrap="wrap" mt="1">
                   {[revision.createdBy, ...revision.contributors]
                     .filter(
-                      (u): u is EventUserLoggedIn =>
-                        u != null && u.type === "dashboard",
+                      (u): u is EventUserLoggedIn | EventUserApiKey =>
+                        u != null &&
+                        (u.type === "dashboard" || u.type === "api_key"),
                     )
                     .filter(
                       (u, idx, arr) =>
-                        arr.findIndex((x) => x.id === u.id) === idx,
+                        arr.findIndex(
+                          (x) => "id" in x && "id" in u && x.id === u.id,
+                        ) === idx,
                     )
                     .map((lu) => {
                       return (
-                        <Flex key={lu.id} align="center" gap="1" wrap="wrap">
+                        <Flex
+                          key={"id" in lu ? lu.id : lu.apiKey}
+                          align="center"
+                          gap="1"
+                          wrap="wrap"
+                        >
                           <EventUser
                             user={lu}
                             display="avatar-name-email"
@@ -417,7 +451,14 @@ export default function RequestReviewModal({
                 <Checkbox
                   label="Bypass approval requirement to publish (optional for Admins only)"
                   value={adminPublish}
-                  setValue={(val) => setAdminPublish(!!val)}
+                  setValue={(val) => {
+                    setAdminPublish(!!val);
+                    if (!val) {
+                      checklistStateRef.current.clear();
+                      setChecklistBlocked(false);
+                      setExperimentsStep(false);
+                    }
+                  }}
                 />
               </div>
             )}
@@ -426,23 +467,32 @@ export default function RequestReviewModal({
               <div>
                 <h3>Review &amp; Publish</h3>
                 <p>
-                  Please review the <strong>Pre-Launch Checklists</strong> for
-                  the experiments that will be published along with this draft.
+                  Please review the{" "}
+                  <strong>
+                    Pre-Launch Checklist
+                    {selectedExperiments.size !== 1 ? "s" : ""}
+                  </strong>{" "}
+                  for the experiment
+                  {selectedExperiments.size !== 1 ? "s" : ""} that will be
+                  published along with this draft.
                 </p>
-                {experimentData.map(({ experiment, checklist }) => {
+                {experiments.map((experiment) => {
                   if (!selectedExperiments.has(experiment.id)) return null;
 
                   return (
                     <div key={experiment.id} className="mb-3">
-                      <PreLaunchChecklistFeatureExpRule
+                      <PreLaunchChecklistForDraft
                         experiment={experiment}
+                        feature={feature}
                         mutateExperiment={mutate}
-                        checklist={checklist}
                         envs={getAffectedEnvsForExperiment({
                           experiment,
                           orgEnvironments: allEnvironments,
                           linkedFeatures: [],
                         })}
+                        onReady={(failed, loading) =>
+                          handleChecklistReady(experiment.id, failed, loading)
+                        }
                       />
                     </div>
                   );
@@ -450,10 +500,10 @@ export default function RequestReviewModal({
               </div>
             ) : (
               <>
-                {approved && experimentData.length > 0 ? (
+                {approved && experiments.length > 0 ? (
                   <div className="mb-3">
                     <h4>Start running experiments upon publishing:</h4>
-                    {experimentData.map(({ experiment }) => (
+                    {experiments.map((experiment) => (
                       <div key={experiment.id}>
                         <Checkbox
                           value={selectedExperiments.has(experiment.id)}

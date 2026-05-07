@@ -10,7 +10,7 @@ import Field from "@/components/Forms/Field";
 import PremiumTooltip from "@/components/Marketing/PremiumTooltip";
 import SelectField from "@/components/Forms/SelectField";
 import MultiSelectField from "@/components/Forms/MultiSelectField";
-import { useEnvironments } from "@/services/features";
+import { useEnvironments, FEATURE_RULES_ALL_ENVS } from "@/services/features";
 import { useDefinitions } from "@/services/DefinitionsContext";
 import Checkbox from "@/ui/Checkbox";
 import Button from "@/ui/Button";
@@ -230,6 +230,10 @@ export default function FeatureSettings() {
                   label: "Remember previous environment",
                   value: "",
                 },
+                {
+                  label: "All Environments",
+                  value: FEATURE_RULES_ALL_ENVS,
+                },
                 ...environments.map((env) => ({
                   label: env.id,
                   value: env.id,
@@ -252,10 +256,11 @@ export default function FeatureSettings() {
                 Drafts and Approvals
               </Heading>
 
-              <Text as="p" size="2" mb="4" color="gray">
-                All changes to features are tracked as revisions. Kill switch
-                changes always open a modal where you can choose to save to a
-                draft or auto-publish.
+              <Text as="p" size="2" mb="2" color="gray">
+                All changes to features are tracked as revisions. Requiring
+                approvals adds a review step before any change goes live. Kill
+                switch changes always prompt a confirmation regardless of
+                approval settings.
               </Text>
 
               {hasRequireApprovals && (
@@ -431,7 +436,7 @@ export default function FeatureSettings() {
                               <Checkbox
                                 id="toggle-restApiBypassesReviews"
                                 label="REST API always bypasses approval requirements"
-                                description="When disabled, API changes that would require review are blocked with an error."
+                                description="When enabled, all API calls bypass approval requirements. When disabled, API calls are blocked unless the caller's role grants bypassApprovalChecks on the feature's project."
                                 value={
                                   form.watch("restApiBypassesReviews") !== false
                                 }

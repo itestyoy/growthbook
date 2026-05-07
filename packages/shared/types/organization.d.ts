@@ -31,7 +31,6 @@ import {
   projectMemberRole,
 } from "shared/validators";
 import { SSOConnectionInterface } from "shared/types/sso-connection";
-import { ApiKeyInterface } from "shared/types/apikey";
 import { TeamInterface } from "shared/types/team";
 import { AttributionModel, ImplementationType } from "./experiment";
 import type { PValueCorrection, StatsEngine } from "./stats";
@@ -152,12 +151,26 @@ export interface MetricDefaults {
   targetMDE?: number;
 }
 
-export interface Namespaces {
+export type NamespaceFormat = NonNullable<Namespaces["format"]>;
+
+export interface NamespaceBase {
   name: string;
   label: string;
   description: string;
   status: "active" | "inactive";
 }
+
+export interface LegacyNamespace extends NamespaceBase {
+  format?: "legacy";
+}
+
+export interface MultiRangeNamespace extends NamespaceBase {
+  format: "multiRange";
+  hashAttribute: string;
+  seed: string;
+}
+
+export type Namespaces = LegacyNamespace | MultiRangeNamespace;
 
 export type SDKAttributeFormat = "" | "version" | "date" | "isoCountryCode";
 
@@ -254,6 +267,7 @@ export interface OrganizationSettings {
   banditBurnInValue?: number;
   banditBurnInUnit?: "hours" | "days";
   requireExperimentTemplates?: boolean;
+  requireUniqueExperimentTrackingKeys?: boolean;
   experimentMinLengthDays?: number;
   experimentMaxLengthDays?: number;
   decisionFrameworkEnabled?: boolean;
@@ -373,7 +387,6 @@ export type GetOrganizationResponse = {
   seatsInUse: number;
   roles: Role[];
   agreements: AgreementType[];
-  apiKeys: ApiKeyInterface[];
   enterpriseSSO: Partial<SSOConnectionInterface> | null;
   accountPlan: AccountPlan;
   effectiveAccountPlan: AccountPlan;

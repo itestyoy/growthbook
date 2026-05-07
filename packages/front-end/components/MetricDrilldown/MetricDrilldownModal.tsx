@@ -5,10 +5,12 @@ import {
   getMetricLink,
   ExperimentMetricInterface,
   ExperimentSortBy,
+  isPrecomputedDimension,
 } from "shared/experiments";
 import {
   DifferenceType,
   PValueCorrection,
+  SignificanceThresholds,
   StatsEngine,
 } from "shared/types/stats";
 import {
@@ -45,6 +47,7 @@ import MetricDrilldownDebug from "./MetricDrilldownDebug";
 import {
   MetricDrilldownContext,
   type MetricDrilldownTab,
+  type DrilldownDimensionInfo,
 } from "./useMetricDrilldownContext";
 
 export type { MetricDrilldownTab };
@@ -79,6 +82,7 @@ interface MetricDrilldownModalProps {
 
   // Experiment context props
   experimentId: string;
+  significanceThresholds: SignificanceThresholds;
   phase: number;
   experimentStatus?: ExperimentStatus;
   variations: ExperimentReportVariation[];
@@ -97,7 +101,7 @@ interface MetricDrilldownModalProps {
   initialSliceSearchTerm?: string;
 
   // Dimension info
-  dimensionInfo?: { name: string; value: string; index: number };
+  dimensionInfo?: DrilldownDimensionInfo;
 
   // When true, timeseries is unavailable and a message is shown instead
   isReportContext?: boolean;
@@ -133,6 +137,7 @@ interface MetricDrilldownContentProps {
   localDifferenceType: DifferenceType;
   setLocalDifferenceType: (type: DifferenceType) => void;
   experimentId: string;
+  significanceThresholds: SignificanceThresholds;
   phase: number;
   experimentStatus?: ExperimentStatus;
   variations: ExperimentReportVariation[];
@@ -146,7 +151,7 @@ interface MetricDrilldownContentProps {
   localSortDirection: "asc" | "desc" | null;
   initialSliceSearchTerm?: string;
   initialTab?: MetricDrilldownTab;
-  dimensionInfo?: { name: string; value: string; index: number };
+  dimensionInfo?: DrilldownDimensionInfo;
   isReportContext: boolean;
 }
 
@@ -170,6 +175,7 @@ const MetricDrilldownContent: FC<MetricDrilldownContentProps> = ({
   localDifferenceType,
   setLocalDifferenceType,
   experimentId,
+  significanceThresholds,
   phase,
   experimentStatus,
   variations,
@@ -189,11 +195,19 @@ const MetricDrilldownContent: FC<MetricDrilldownContentProps> = ({
   const { isAuthenticated } = useAuth();
   const { analysis } = useSnapshot();
 
-  // When dimensionInfo is provided (from BreakDownResults), use the passed initialResults
-  // which contains the correct dimension-specific data. Otherwise, use snapshot results.
-  const results = dimensionInfo
-    ? initialResults
-    : (analysis?.results?.[0] ?? initialResults);
+  const liveResults = useMemo(() => {
+    if (!dimensionInfo) {
+      return analysis?.results?.[0];
+    }
+    return analysis?.results?.find(
+      (result) => result.name === dimensionInfo.rawValue,
+    );
+  }, [analysis?.results, dimensionInfo]);
+
+  // Re-resolve the selected slice on every render against the latest
+  // analysis results. If the slice disappears after a refresh, keep showing
+  // the data captured at open-time and surface that staleness explicitly.
+  const results = liveResults ?? initialResults;
 
   // TODO: Check what we need here
   const [expandedMetrics] = useState<Record<string, boolean>>(() => {
@@ -218,6 +232,7 @@ const MetricDrilldownContent: FC<MetricDrilldownContentProps> = ({
     shouldShowMetricSlices: true,
     enableExpansion: true,
     expandedMetrics,
+    pValueThreshold: significanceThresholds.pValueThreshold,
   });
 
   const mainMetricRow = useMemo(() => {
@@ -230,7 +245,9 @@ const MetricDrilldownContent: FC<MetricDrilldownContentProps> = ({
   const [sliceSearchTerm, setSliceSearchTerm] = useState(
     initialSliceSearchTerm || "",
   );
-  const hideTimeSeries = isReportContext || !!dimensionInfo;
+  const hideTimeSeries =
+    isReportContext ||
+    (!!dimensionInfo && !isPrecomputedDimension(dimensionInfo.id));
   const [visibleSliceTimeSeriesRowIds, setVisibleSliceTimeSeriesRowIds] =
     useState<string[]>(() => {
       if (
@@ -296,6 +313,7 @@ const MetricDrilldownContent: FC<MetricDrilldownContentProps> = ({
         <MetricDrilldownOverview
           row={mainMetricRow}
           experimentId={experimentId}
+          significanceThresholds={significanceThresholds}
           reportDate={reportDate}
           isLatestPhase={isLatestPhase}
           phase={phase}
@@ -318,10 +336,11 @@ const MetricDrilldownContent: FC<MetricDrilldownContentProps> = ({
           timeSeriesMessage={
             isReportContext
               ? "Time series data is not available for custom reports."
-              : dimensionInfo
+              : dimensionInfo && !isPrecomputedDimension(dimensionInfo.id)
                 ? "Time series is not available for unit dimension breakdowns."
                 : undefined
           }
+          dimensionInfo={dimensionInfo}
         />
       </TabsContent>
       <TabsContent value="slices">
@@ -337,6 +356,7 @@ const MetricDrilldownContent: FC<MetricDrilldownContentProps> = ({
           variationFilter={localVariationFilter}
           setVariationFilter={setLocalVariationFilter}
           experimentId={experimentId}
+          significanceThresholds={significanceThresholds}
           phase={phase}
           variations={variations}
           startDate={startDate}
@@ -354,12 +374,14 @@ const MetricDrilldownContent: FC<MetricDrilldownContentProps> = ({
           setVisibleTimeSeriesRowIds={setVisibleSliceTimeSeriesRowIds}
           ssrPolyfills={ssrPolyfills}
           hideTimeSeries={hideTimeSeries}
+          dimensionInfo={dimensionInfo}
         />
       </TabsContent>
       <TabsContent value="debug">
         <MetricDrilldownDebug
           row={mainMetricRow}
           metric={metric}
+          significanceThresholds={significanceThresholds}
           statsEngine={statsEngine}
           differenceType={localDifferenceType}
           setDifferenceType={setLocalDifferenceType}
@@ -405,6 +427,7 @@ const MetricDrilldownModal = ({
   variationFilter,
   // Experiment context
   experimentId,
+  significanceThresholds,
   phase,
   experimentStatus,
   variations,
@@ -475,6 +498,7 @@ const MetricDrilldownModal = ({
     localDifferenceType,
     setLocalDifferenceType,
     experimentId,
+    significanceThresholds,
     phase,
     experimentStatus,
     variations,

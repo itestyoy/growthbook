@@ -64,13 +64,11 @@ The external REST API is for customers to integrate with GrowthBook programmatic
 - Mounted at: `/api/v1/` prefix
 - BaseModel resources can provide `apiConfig` to define their API endpoints
 - OpenAPI docs are auto-generated from Zod schemas in `src/api/specs/*.spec.ts`
-- Legacy definitions for API routes are in `packages/back-end/src/api/` with corresponding yaml specs in `packages/back-end/src/api/openapi/`
-
-> **⚠️ Avoid creating new hand-written YAML files** in `src/api/openapi/paths/`, `src/api/openapi/payload-schemas/`, or `src/api/openapi/schemas/`. These directories contain legacy definitions that have not yet been migrated. New endpoints should use the spec-based approach described below whenever possible.
+- Handlers are in `src/api/` organized by resource, with routes registered in `src/api/api.router.ts`
 
 ### Spec-Based Pattern (for BaseModel-compatible endpoints)
 
-Any endpoint backed by a `BaseModel` should use the `apiConfig` + spec pattern. This can be used to auto-generate standard CRUD endpoints, OpenAPI documentation, and routing from minimal definitions in Zod. If an endpoint uses a legacy (non-BaseModel) resource or isn't directly related to any models, then use the legacy pattern defined below.
+Any endpoint backed by a `BaseModel` should use the `apiConfig` + spec pattern. This auto-generates standard CRUD endpoints, OpenAPI documentation, and routing from minimal definitions in Zod. If an endpoint isn't directly related to any model, use the non-BaseModel pattern described below.
 
 The configuration is split into two parts:
 
@@ -251,14 +249,46 @@ const BaseClass = MakeModelClass({
 
 Note how the endpoint spec (metadata for docs) is spread into `defineCustomApiHandler` which adds the runtime `reqHandler`. This keeps doc-generation concerns separate from runtime code.
 
-### Legacy Pattern (Non-BaseModel or Resourceless Endpoints Only)
+#### Naming API schemas with `namedSchema`
 
-Some external API endpoints are not backed by a `BaseModel` — for example, ad-hoc RPC-style actions, query/exploration endpoints, or endpoints that orchestrate across multiple models without a single owning resource. For these cases, the older manual pattern is still acceptable:
+When a Zod validator represents a top-level API model (the kind that should appear in the "Models" section of the API docs), wrap it with `namedSchema` from `shared/validators/openapi-helpers`:
+
+```typescript
+// In packages/shared/src/validators/my-resource.ts
+import { namedSchema } from "./openapi-helpers";
+
+export const apiMyResourceValidator = namedSchema(
+  "MyResource",
+  z.object({ id: z.string(), name: z.string() /* ... */ }),
+);
+```
+
+**What it does:**
+
+- Tags the schema with `.meta({ id: "MyResource" })` so `z.toJSONSchema` emits it as a `$ref` instead of inlining
+- Registers the schema in `namedSchemaRegistry` so `generate-openapi.ts` includes it in `components/schemas/` even if it's never referenced as a sub-schema
+- Generates a `MyResource_model` tag in the spec with a `<SchemaDefinition>` description for the docs "Models" section
+
+**When to use it:** Only for validators that represent a named API model — typically the `api*Validator` exported from a validator file (e.g., `apiFeatureValidator`, `apiExperimentValidator`). Don't use it for request body schemas, internal sub-schemas, or validators that are only used for validation.
+
+### OpenAPI Spec Generation
+
+The OpenAPI spec is generated from Zod validators by `packages/back-end/src/scripts/generate-openapi.ts`. After making changes to validators or API endpoints, regenerate and commit the updated spec:
+
+```bash
+pnpm --filter back-end generate-openapi
+```
+
+This rebuilds `shared` first, then produces `generated/spec.yaml` from the Zod validators and route definitions. The generated spec should be committed alongside the code changes.
+
+### Non-BaseModel Endpoints
+
+Some external API endpoints are not backed by a `BaseModel` — for example, ad-hoc RPC-style actions, query/exploration endpoints, or endpoints that orchestrate across multiple models without a single owning resource:
 
 - Create a resource directory under `src/api/` with a `*.router.ts` and individual handler files
-- Define yaml files for each endpoint and payload schema in `src/api/openapi/`. Running `generate-api-types` will add exported validators to `shared/src/validators/openapi.ts` for each.
-- Use `createApiRequestHandler()` with Zod validators (imported from `shared/validators`) in each handler
-- Register the router manually in `src/api/api.router.ts`
+- Define Zod validators in `shared/src/validators/` for request/response schemas
+- Use `createApiRequestHandler()` with those validators in each handler
+- Register the router in `src/api/api.router.ts`
 
 **Example structure:**
 
@@ -275,6 +305,53 @@ src/api/
     getExperiments.ts
     ...
 ```
+
+### Resolving `ownerEmail` on API Responses
+
+Every external API response that includes an owner-bearing resource must expose a resolved `ownerEmail` alongside the raw `owner` field. Use the helpers in [src/services/owner.ts](../../../packages/back-end/src/services/owner.ts):
+
+- `resolveOwnerEmail(apiDoc, context)` — for a single API doc
+- `resolveOwnerEmails(apiDocs, context)` — for a list (batches the DB lookup)
+
+Both are no-ops for docs without a string `owner` field, so they're safe to call unconditionally.
+
+**Spec-based endpoints:** The default `handleApiGet`, `handleApiCreate`, `handleApiList`, and `handleApiUpdate` implementations in `BaseModel` already wrap their return value with the appropriate helper — no action needed unless you override them.
+
+**Overriding `handleApi*`:** When you override one of these methods you replace the base implementation, so call the helper yourself before returning:
+
+```typescript
+public override async handleApiList(
+  req: Parameters<InstanceType<typeof BaseClass>["handleApiList"]>[0],
+): Promise<ApiMyResource[]> {
+  const docs = await this._find({ project: req.query.projectId });
+  return resolveOwnerEmails(
+    docs.map((doc) => this.toApiInterface(doc)),
+    this.context,
+  );
+}
+```
+
+**Non-BaseModel endpoints:** Wrap the final API shape at the return statement. Use `resolveOwnerEmails` for lists so the user lookup is batched:
+
+```typescript
+// Single doc
+return {
+  archetype: await resolveOwnerEmail(
+    toArchetypeApiInterface(archetype),
+    req.context,
+  ),
+};
+
+// List
+return {
+  archetypes: await resolveOwnerEmails(
+    filtered.map((a) => toArchetypeApiInterface(a)),
+    req.context,
+  ),
+};
+```
+
+Call the helper on the final API-shaped object — don't try to look up owner emails inside `toApiInterface` or equivalent serializers, since they're sync and per-doc.
 
 ### Authentication (External API)
 

@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { v4 as uuidv4 } from "uuid";
 import {
+  apiRampScheduleInterface,
   featureRulePatch,
   RampScheduleInterface,
   RampScheduleTemplateInterface,
@@ -9,7 +10,13 @@ import {
 import type { FeatureInterface } from "shared/types/feature";
 import { createApiRequestHandler } from "back-end/src/util/handler";
 import { getFeature } from "back-end/src/models/FeatureModel";
-import { dispatchRampEvent } from "back-end/src/services/rampSchedule";
+import { rampScheduleToApiInterface } from "back-end/src/models/RampScheduleModel";
+import {
+  dispatchRampEvent,
+  remapTemplateActions,
+} from "back-end/src/services/rampSchedule";
+import { resolveRampTarget } from "back-end/src/util/flattenRules";
+import { BadRequestError, NotFoundError } from "back-end/src/util/errors";
 
 const postBodyAction = z.object({
   targetType: z.literal("feature-rule").optional(),
@@ -18,10 +25,12 @@ const postBodyAction = z.object({
 });
 type PostBodyAction = z.infer<typeof postBodyAction>;
 
+// Tight ISO datetime validation for all ramp date fields so bad strings
+// fail here rather than downstream in `new Date()`.
 const apiRampTrigger = z.union([
   z.object({ type: z.literal("interval"), seconds: z.number().positive() }),
   z.object({ type: z.literal("approval") }),
-  z.object({ type: z.literal("scheduled"), at: z.string() }),
+  z.object({ type: z.literal("scheduled"), at: z.string().datetime() }),
 ]);
 
 const postBodyStep = z.object({
@@ -31,9 +40,15 @@ const postBodyStep = z.object({
 });
 
 const postRampScheduleValidator = {
+  method: "post" as const,
+  path: "/ramp-schedules",
+  operationId: "postRampSchedule",
+  summary: "Create a ramp schedule",
+  tags: ["ramp-schedules"],
+  responseSchema: z.object({ rampSchedule: apiRampScheduleInterface }),
   bodySchema: z
     .object({
-      name: z.string(),
+      name: z.string().optional(),
       featureId: z.string().optional(),
       ruleId: z.string().optional(),
       environment: z.string().optional(),
@@ -64,45 +79,12 @@ const postRampScheduleValidator = {
           message: "ruleId is required when environment is provided",
         });
       }
-      if (data.ruleId && !data.environment) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ["environment"],
-          message: "environment is required when ruleId is provided",
-        });
-      }
+      // NOTE: `environment` is no longer required alongside `ruleId`. Post-v2,
+      // `rule.id` is uniquely sufficient within a feature's unified rule list;
+      // env is a deprecated pre-v2 disambiguator. See `rampTarget` in
+      // shared/validators.
     }),
 };
-
-function forceMatchesValueType(
-  value: unknown,
-  valueType: FeatureInterface["valueType"],
-): boolean {
-  if (value === null || value === undefined) return false;
-  const t = typeof value;
-  if (valueType === "boolean") return t === "boolean";
-  if (valueType === "number") return t === "number";
-  if (valueType === "string") return t === "string";
-  if (valueType === "json") return t === "object";
-  return false;
-}
-
-// Remaps template actions to the real targetId/ruleId; strips incompatible `force` values.
-function remapTemplateActions(
-  actions: RampScheduleTemplateInterface["steps"][number]["actions"],
-  targetId: string,
-  ruleId: string,
-  valueType: FeatureInterface["valueType"],
-): RampStepAction[] {
-  return (actions ?? []).map((a) => {
-    const patch = { ...a.patch, ruleId };
-    if ("force" in patch && !forceMatchesValueType(patch.force, valueType)) {
-      const { force: _force, ...rest } = patch;
-      return { targetType: "feature-rule" as const, targetId, patch: rest };
-    }
-    return { targetType: "feature-rule" as const, targetId, patch };
-  });
-}
 
 function normalizeApiTrigger(
   trigger: z.infer<typeof apiRampTrigger>,
@@ -124,7 +106,7 @@ function normalizeAction(action: PostBodyAction): RampStepAction {
   };
 }
 
-// Overrides targetId and ruleId from top-level shorthand fields.
+// Overrides targetId/ruleId from the top-level shorthand fields.
 function injectTarget(
   action: PostBodyAction,
   targetId: string,
@@ -142,15 +124,15 @@ export const postRampSchedule = createApiRequestHandler(
 )(async (req) => {
   const body = req.body;
 
-  // REST uses Enterprise ("ramp-schedules"); the dashboard uses Pro ("schedule-feature-flag")
-  // because simple schedules share infrastructure there.
+  // REST uses the Enterprise "ramp-schedules" gate; the dashboard uses the
+  // Pro "schedule-feature-flag" gate since simple schedules share the infra.
   if (!req.context.hasPremiumFeature("ramp-schedules")) {
     req.context.throwPlanDoesNotAllowError(
       "Ramp schedules require an Enterprise plan.",
     );
   }
 
-  const hasTarget = !!(body.featureId && body.ruleId && body.environment);
+  const hasTarget = !!(body.featureId && body.ruleId);
 
   let targetId: string | undefined;
   let feature: FeatureInterface | null = null;
@@ -158,29 +140,33 @@ export const postRampSchedule = createApiRequestHandler(
   if (body.featureId) {
     feature = await getFeature(req.context, body.featureId);
     if (!feature) {
-      throw new Error(`Feature '${body.featureId}' not found`);
+      throw new NotFoundError(`Feature '${body.featureId}' not found`);
     }
   }
 
   if (hasTarget) {
-    const envRules =
-      feature!.environmentSettings?.[body.environment!]?.rules ?? [];
-    const rule = envRules.find((r) => r.id === body.ruleId);
+    const envSuffix = body.environment
+      ? ` in environment '${body.environment}'`
+      : "";
+    const rule = resolveRampTarget(
+      { ruleId: body.ruleId!, environment: body.environment ?? null },
+      feature!.rules ?? [],
+    );
     if (!rule) {
-      throw new Error(
-        `Rule '${body.ruleId}' not found in environment '${body.environment}'. ` +
+      throw new NotFoundError(
+        `Rule '${body.ruleId}' not found${envSuffix}. ` +
           `The rule must be published before attaching a ramp schedule.`,
       );
     }
 
     const conflicting = await req.context.models.rampSchedules.findByTargetRule(
       body.ruleId!,
-      body.environment!,
+      body.environment ?? undefined,
     );
     if (conflicting.length > 0) {
-      throw new Error(
-        `A ramp schedule (${conflicting[0].id}) already controls rule '${body.ruleId}' ` +
-          `in environment '${body.environment}'. Delete it first before creating a new one.`,
+      throw new BadRequestError(
+        `A ramp schedule (${conflicting[0].id}) already controls rule '${body.ruleId}'${envSuffix}. ` +
+          `Delete it first before creating a new one.`,
       );
     }
 
@@ -193,14 +179,14 @@ export const postRampSchedule = createApiRequestHandler(
       body.templateId,
     );
     if (!tmpl) {
-      throw new Error(`Template '${body.templateId}' not found`);
+      throw new NotFoundError(`Template '${body.templateId}' not found`);
     }
     template = tmpl;
   }
 
   const startDate = body.startDate ? new Date(body.startDate) : undefined;
 
-  // body steps → template steps (when target known) → []
+  // Prefer body steps, fall back to template steps (if target known), else [].
   const resolvedSteps: RampScheduleInterface["steps"] = (() => {
     if (body.steps !== undefined) {
       return body.steps.map((s) => ({
@@ -245,7 +231,10 @@ export const postRampSchedule = createApiRequestHandler(
         {
           targetType: "feature-rule" as const,
           targetId: targetId!,
-          patch: { ruleId: body.ruleId!, ...template.endPatch },
+          patch: {
+            ruleId: body.ruleId!,
+            ...template.endPatch,
+          },
         },
       ];
     }
@@ -254,15 +243,17 @@ export const postRampSchedule = createApiRequestHandler(
 
   const rawEndTrigger = body.endCondition?.trigger;
   const endTrigger = rawEndTrigger
-    ? {
-        type: "scheduled" as const,
-        at: new Date((rawEndTrigger as { type: string; at: string | Date }).at),
-      }
+    ? { type: "scheduled" as const, at: new Date(rawEndTrigger.at) }
     : undefined;
   const endCondition = endTrigger ? { trigger: endTrigger } : undefined;
 
+  const defaultName = `Ramp schedule \u2013 ${new Date().toLocaleDateString(
+    "en-US",
+    { month: "short", year: "numeric" },
+  )}`;
+
   const schedule = await req.context.models.rampSchedules.create({
-    name: body.name,
+    name: body.name ?? defaultName,
     entityType: "feature",
     entityId: body.featureId ?? "",
     targets: hasTarget
@@ -272,7 +263,11 @@ export const postRampSchedule = createApiRequestHandler(
             entityType: "feature",
             entityId: body.featureId!,
             ruleId: body.ruleId,
-            environment: body.environment,
+            // `environment` is deliberately omitted on new targets. Post-v2
+            // `rule.id` is uniquely sufficient within a feature's unified rule
+            // list; env is a deprecated pre-v2 disambiguator. The resolver
+            // and DB-side lookup still honor stored `environment` for legacy
+            // targets. See `rampTarget` in shared/validators.
             status: "active",
           },
         ]
@@ -300,5 +295,5 @@ export const postRampSchedule = createApiRequestHandler(
     },
   });
 
-  return { rampSchedule: schedule };
+  return { rampSchedule: rampScheduleToApiInterface(schedule) };
 });

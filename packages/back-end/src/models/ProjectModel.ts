@@ -1,9 +1,8 @@
-import { ApiProject } from "shared/types/openapi";
 import {
   ManagedBy,
   ProjectInterface,
-  ProjectSettings,
   projectValidator,
+  ApiProject,
 } from "shared/validators";
 import { queueSDKPayloadRefresh } from "back-end/src/services/features";
 import { getEnvironmentIdsFromOrg } from "back-end/src/services/organizations";
@@ -37,14 +36,6 @@ const BaseClass = MakeModelClass({
     settings: {},
   },
 });
-
-interface CreateProjectProps {
-  name: string;
-  description?: string;
-  publicId?: string;
-  id?: string;
-  managedBy?: ManagedBy;
-}
 
 export class ProjectModel extends BaseClass {
   protected canRead(doc: ProjectInterface) {
@@ -165,14 +156,6 @@ export class ProjectModel extends BaseClass {
     }
   }
 
-  public create(project: CreateProjectProps) {
-    return super.create({ ...project, settings: {} });
-  }
-
-  public updateSettingsById(id: string, settings: Partial<ProjectSettings>) {
-    return super.updateById(id, { settings });
-  }
-
   // Warning: This function is only used internally at the moment.
   // Make sure to add permission check if this functions gets
   // used in a context that needs it.
@@ -211,6 +194,8 @@ export class ProjectModel extends BaseClass {
       dateUpdated: project.dateUpdated.toISOString(),
       settings: {
         statsEngine: project.settings?.statsEngine,
+        confidenceLevel: project.settings?.confidenceLevel,
+        pValueThreshold: project.settings?.pValueThreshold,
       },
     };
   }

@@ -1,7 +1,6 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
 
 import { v4 as uuidv4 } from "uuid";
-import uniqid from "uniqid";
 import mongoose, { FilterQuery } from "mongoose";
 import { AnyBulkWriteOperation, Collection } from "mongodb";
 import omit from "lodash/omit";
@@ -32,7 +31,12 @@ import {
 } from "back-end/src/api/ApiModel";
 import { CrudAction } from "back-end/src/api/apiModelHandlers";
 import { dbSafeBulkWrite } from "back-end/src/util/mongo.util";
-import { resolveOwnerToUserId } from "back-end/src/services/owner";
+import { generateId } from "back-end/src/util/uuid";
+import {
+  resolveOwnerEmail,
+  resolveOwnerEmails,
+  resolveOwnerToUserId,
+} from "back-end/src/services/owner";
 
 export type Context = ApiReqContext | ReqContext;
 
@@ -417,7 +421,7 @@ export abstract class BaseModel<
     const { id } = req.params as { id: string };
     const doc = await this.getById(id);
     if (!doc) req.context.throwNotFoundError();
-    return this.toApiInterface(doc);
+    return resolveOwnerEmail(this.toApiInterface(doc), this.context);
   }
   public async handleApiCreate(
     req: ApiRequest<
@@ -429,7 +433,10 @@ export abstract class BaseModel<
   ): Promise<z.infer<ApiT>> {
     const rawBody = req.body;
     const toCreate = await this.processApiCreateBody(rawBody);
-    return this.toApiInterface(await this.create(toCreate));
+    return resolveOwnerEmail(
+      this.toApiInterface(await this.create(toCreate)),
+      this.context,
+    );
   }
   protected async processApiCreateBody(
     rawBody: unknown,
@@ -444,7 +451,10 @@ export abstract class BaseModel<
       ExtractCrudSchema<CVO, "list", "querySchema">
     >,
   ): Promise<z.infer<ApiT>[]> {
-    return (await this.getAll()).map(this.toApiInterface.bind(this));
+    return resolveOwnerEmails(
+      (await this.getAll()).map((doc) => this.toApiInterface(doc)),
+      this.context,
+    );
   }
   public async handleApiDelete(
     req: ApiRequest<
@@ -469,7 +479,10 @@ export abstract class BaseModel<
     const { id } = req.params as { id: string };
     const rawBody = req.body;
     const toUpdate = await this.processApiUpdateBody(rawBody);
-    return this.toApiInterface(await this.updateById(id, toUpdate));
+    return resolveOwnerEmail(
+      this.toApiInterface(await this.updateById(id, toUpdate)),
+      this.context,
+    );
   }
   protected async processApiUpdateBody(
     rawBody: unknown,
@@ -603,7 +616,7 @@ export abstract class BaseModel<
    * Internal methods that can be used by subclasses
    ***************/
   protected _generateId() {
-    return uniqid(this.config.idPrefix);
+    return generateId(this.config.idPrefix);
   }
   protected _generateUid() {
     return uuidv4().replace(/-/g, "");
@@ -1245,6 +1258,20 @@ export abstract class BaseModel<
   }
 }
 
+/**
+ * Merges body schemas from openApiSpec.schemas into the CVO type so that
+ * ExtractCrudSchema can resolve the correct body type for create/update
+ * handler overrides — even when the schemas are not in crudValidatorOverrides.
+ */
+type MergedCrudOverrides<
+  CVO extends CrudValidatorOverrides,
+  CB extends z.ZodTypeAny,
+  UB extends z.ZodTypeAny,
+> = CVO & {
+  create: { bodySchema: CB };
+  update: { bodySchema: UB };
+};
+
 export const MakeModelClass = <
   T extends BaseSchemaWithPrimaryKey<PKey>,
   E extends EntityType,
@@ -1252,9 +1279,16 @@ export const MakeModelClass = <
   PKey extends z.ZodRawShape,
   PK extends readonly string[] = typeof DEFAULT_PKEY,
   CVO extends CrudValidatorOverrides = CrudValidatorOverrides,
+  CB extends z.ZodTypeAny = z.ZodUnknown,
+  UB extends z.ZodTypeAny = z.ZodUnknown,
 >(
   config: ModelConfig<T, E, ApiT, PKey> & {
-    apiConfig?: { openApiSpec?: { crudValidatorOverrides?: CVO } };
+    apiConfig?: {
+      openApiSpec?: {
+        crudValidatorOverrides?: CVO;
+        schemas?: { createBody?: CB; updateBody?: UB };
+      };
+    };
   } & { pKey?: PK },
 ) => {
   const createValidator = createSchema<T, PKey>(config.schema);
@@ -1270,7 +1304,7 @@ export const MakeModelClass = <
     PKey,
     WriteOptions,
     PK,
-    CVO
+    MergedCrudOverrides<CVO, CB, UB>
   > {
     getConfig() {
       return config as ModelConfig<T, E, ApiT, PKey>;

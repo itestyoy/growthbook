@@ -3,6 +3,8 @@ import { apiBaseSchema } from "./base-model";
 import { queryPointerValidator } from "./queries";
 import { rowFilterValidator } from "./fact-table";
 
+import { namedSchema } from "./openapi-helpers";
+
 const baseValueValidator = z.object({
   name: z.string(),
   rowFilters: z.array(rowFilterValidator),
@@ -148,17 +150,27 @@ export const dateRangePredefined = [
 
 export const lookbackUnit = ["hour", "day", "week", "month"] as const;
 
+export const showAsValidator = z.enum(["total", "per_unit"]);
+export type ShowAs = z.infer<typeof showAsValidator>;
+
 export const baseExplorationConfigValidator = z.object({
   datasource: z.string().describe("ID of the datasource to query"),
   dimensions: z.array(dimensionValidator),
   chartType: z.enum(chartTypes),
   dateRange: z.object({
     predefined: z.enum(dateRangePredefined),
-    lookbackValue: z.number().nullable(),
-    lookbackUnit: z.enum(lookbackUnit).nullable(),
-    startDate: z.string().nullable(),
-    endDate: z.string().nullable(),
+    lookbackValue: z.number().nullish(),
+    lookbackUnit: z.enum(lookbackUnit).nullish(),
+    startDate: z.string().nullish(),
+    endDate: z.string().nullish(),
   }),
+  // Controls how values with a denominator are rendered at the chart level.
+  // "total"    -> render the raw numerator (e.g. total events)
+  // "per_unit" -> divide numerator by denominator (e.g. events per unit)
+  // Ratio metrics are self-contained and always render as numerator/denominator
+  // regardless of this setting.
+  // Optional for backward compatibility; read sites default to "total".
+  showAs: showAsValidator.optional(),
 });
 
 export const metricExplorationConfigValidator =
@@ -305,10 +317,12 @@ export const apiDataSourceExplorationValidator =
     config: dataSourceExplorationConfigValidator,
   });
 
-export const apiAnalyticsExplorationValidator =
+export const apiAnalyticsExplorationValidator = namedSchema(
+  "AnalyticsExploration",
   apiExplorationBaseValidator.safeExtend({
     config: explorationConfigValidator,
-  });
+  }),
+);
 
 export type ApiAnalyticsExploration = z.infer<
   typeof apiAnalyticsExplorationValidator

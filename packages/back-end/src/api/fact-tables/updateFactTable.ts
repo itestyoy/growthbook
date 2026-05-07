@@ -1,5 +1,4 @@
 import { omit } from "lodash";
-import { UpdateFactTableResponse } from "shared/types/openapi";
 import { updateFactTableValidator } from "shared/validators";
 import { UpdateFactTableProps } from "shared/types/fact-table";
 import { queueFactTableColumnsRefresh } from "back-end/src/jobs/refreshFactTableColumns";
@@ -12,7 +11,10 @@ import {
 } from "back-end/src/models/FactTableModel";
 import { addTagsDiff } from "back-end/src/models/TagModel";
 import { createApiRequestHandler } from "back-end/src/util/handler";
-import { resolveOwnerToUserId } from "back-end/src/services/owner";
+import {
+  resolveOwnerToUserId,
+  resolveOwnerEmail,
+} from "back-end/src/services/owner";
 
 // Type override to handle auto-generated OpenAPI types vs internal types
 type UpdateFactTableRequest = Omit<UpdateFactTableProps, "columns"> & {
@@ -21,7 +23,7 @@ type UpdateFactTableRequest = Omit<UpdateFactTableProps, "columns"> & {
 
 export const updateFactTable = createApiRequestHandler(
   updateFactTableValidator,
-)(async (req): Promise<UpdateFactTableResponse> => {
+)(async (req) => {
   const factTable = await getFactTable(req.context, req.params.id);
   if (!factTable) {
     throw new Error("Could not find factTable with that id");
@@ -108,26 +110,30 @@ export const updateFactTable = createApiRequestHandler(
     await addTagsDiff(req.organization.id, factTable.tags, data.tags);
   }
 
+  const updatedFactTable = {
+    ...factTable,
+    ...req.body,
+    columns: req.body.columns
+      ? (
+          req.body.columns as NonNullable<UpdateFactTableRequest["columns"]>
+        ).map((col) => ({
+          ...col,
+          name: col.name ?? col.column,
+          description: col.description ?? "",
+          numberFormat: col.numberFormat ?? "",
+          dateCreated:
+            factTable.columns.find((c) => c.column === col.column)
+              ?.dateCreated || new Date(),
+          dateUpdated: new Date(),
+          deleted: false,
+        }))
+      : factTable.columns,
+  };
   return {
-    factTable: toFactTableApiInterface({
-      ...factTable,
-      ...req.body,
-      columns: req.body.columns
-        ? (
-            req.body.columns as NonNullable<UpdateFactTableRequest["columns"]>
-          ).map((col) => ({
-            ...col,
-            name: col.name ?? col.column,
-            description: col.description ?? "",
-            numberFormat: col.numberFormat ?? "",
-            dateCreated:
-              factTable.columns.find((c) => c.column === col.column)
-                ?.dateCreated || new Date(),
-            dateUpdated: new Date(),
-            deleted: false,
-          }))
-        : factTable.columns,
-    }),
+    factTable: await resolveOwnerEmail(
+      toFactTableApiInterface(updatedFactTable),
+      req.context,
+    ),
   };
 });
 

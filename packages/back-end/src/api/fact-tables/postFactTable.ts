@@ -1,4 +1,3 @@
-import { PostFactTableResponse } from "shared/types/openapi";
 import { postFactTableValidator } from "shared/validators";
 import { CreateFactTableProps } from "shared/types/fact-table";
 import { queueFactTableColumnsRefresh } from "back-end/src/jobs/refreshFactTableColumns";
@@ -9,10 +8,13 @@ import {
 } from "back-end/src/models/FactTableModel";
 import { addTags } from "back-end/src/models/TagModel";
 import { createApiRequestHandler } from "back-end/src/util/handler";
-import { resolveOwnerToUserId } from "back-end/src/services/owner";
+import {
+  resolveOwnerToUserId,
+  resolveOwnerEmail,
+} from "back-end/src/services/owner";
 
 export const postFactTable = createApiRequestHandler(postFactTableValidator)(
-  async (req): Promise<PostFactTableResponse> => {
+  async (req) => {
     const owner =
       (await resolveOwnerToUserId(req.body.owner, req.context)) ?? "";
     const data: CreateFactTableProps = {
@@ -65,7 +67,10 @@ export const postFactTable = createApiRequestHandler(postFactTableValidator)(
     }
 
     return {
-      factTable: toFactTableApiInterface(factTable),
+      factTable: await resolveOwnerEmail(
+        toFactTableApiInterface(factTable),
+        req.context,
+      ),
     };
   },
 );

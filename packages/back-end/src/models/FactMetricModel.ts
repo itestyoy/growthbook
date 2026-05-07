@@ -9,7 +9,7 @@ import {
   getSelectedColumnDatatype,
 } from "shared/experiments";
 import { UpdateProps } from "shared/types/base-model";
-import { factMetricValidator } from "shared/validators";
+import { factMetricValidator, ApiFactMetric } from "shared/validators";
 import {
   ColumnRef,
   FactMetricInterface,
@@ -18,7 +18,6 @@ import {
   LegacyColumnRef,
   LegacyFactMetricInterface,
 } from "shared/types/fact-table";
-import { ApiFactMetric } from "shared/types/openapi";
 import { DEFAULT_CONVERSION_WINDOW_HOURS } from "back-end/src/util/secrets";
 import { promiseAllChunks } from "back-end/src/util/promise";
 import { getSourceIntegrationObject } from "back-end/src/services/datasource";
@@ -27,6 +26,7 @@ import {
   validateFactMetricRowFilterSql,
 } from "back-end/src/services/factMetricRowFilterValidation";
 import { projectFilterQuery } from "back-end/src/util/mongo.util";
+import { validateAggregationSpecification } from "back-end/src/services/factMetricAggregationValidation";
 import { MakeModelClass } from "./BaseModel";
 import { getDataSourceById } from "./DataSourceModel";
 import { getFactTableMap } from "./FactTableModel";
@@ -345,6 +345,19 @@ export class FactMetricModel extends BaseClass {
       filterType: "numerator",
     });
 
+    // Validate aggregation/datatype constraints (runs for every code path
+    // that hits BaseModel — internal UI controllers, external API,
+    // bulk import, etc.)
+    validateAggregationSpecification({
+      errorPrefix: "Numerator misspecified. ",
+      column: data.numerator,
+      factTable: numeratorFactTable,
+      metricType: data.metricType,
+      quantileType: data.quantileSettings?.type,
+      quantileIgnoreZeros: data.quantileSettings?.ignoreZeros,
+      quantileEventCountColumn: data.quantileSettings?.quantileEventCountColumn,
+    });
+
     // validate column
     const metricSupportsDistinctDates =
       data.metricType === "mean" ||
@@ -395,6 +408,17 @@ export class FactMetricModel extends BaseClass {
         columnRef: data.denominator,
         factTable: denominatorFactTable,
         filterType: "denominator",
+      });
+
+      validateAggregationSpecification({
+        errorPrefix: "Denominator misspecified. ",
+        column: data.denominator,
+        factTable: denominatorFactTable,
+        metricType: data.metricType,
+        quantileType: data.quantileSettings?.type,
+        quantileIgnoreZeros: data.quantileSettings?.ignoreZeros,
+        // Override is numerator-only; never relevant for denominators.
+        quantileEventCountColumn: undefined,
       });
     } else if (data.denominator?.factTableId) {
       throw new Error("Denominator not allowed for non-ratio metric");

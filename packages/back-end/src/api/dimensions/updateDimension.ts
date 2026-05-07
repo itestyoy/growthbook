@@ -1,8 +1,10 @@
-import { UpdateDimensionResponse } from "shared/types/openapi";
 import { updateDimensionValidator } from "shared/validators";
 import { DimensionInterface } from "shared/types/dimension";
 import { createApiRequestHandler } from "back-end/src/util/handler";
-import { resolveOwnerToUserId } from "back-end/src/services/owner";
+import {
+  resolveOwnerToUserId,
+  resolveOwnerEmail,
+} from "back-end/src/services/owner";
 import {
   findDimensionById,
   updateDimension as updateDimensionModel,
@@ -12,7 +14,7 @@ import { getDataSourceById } from "back-end/src/models/DataSourceModel";
 
 export const updateDimension = createApiRequestHandler(
   updateDimensionValidator,
-)(async (req): Promise<UpdateDimensionResponse> => {
+)(async (req) => {
   const organization = req.organization.id;
   const dimension = await findDimensionById(req.params.id, organization);
 
@@ -46,7 +48,11 @@ export const updateDimension = createApiRequestHandler(
 
   await updateDimensionModel(req.context, dimension, updates);
 
+  const updatedDimension = { ...dimension, ...updates };
   return {
-    dimension: toDimensionApiInterface({ ...dimension, ...updates }),
+    dimension: await resolveOwnerEmail(
+      toDimensionApiInterface(updatedDimension),
+      req.context,
+    ),
   };
 });
