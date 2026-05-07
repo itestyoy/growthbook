@@ -927,12 +927,605 @@ export default abstract class SqlIntegration
     );
   }
 
+    const timestampColumn = "e.timestamp";
+    // BQ datetime cast for SELECT statements (do not use for where)
+    const timestampDateTimeColumn = this.castUserDateCol(timestampColumn);
+    const overrideConversionWindows =
+      settings.attributionModel === "experimentDuration" ||
+      settings.attributionModel === "lookbackOverride";
+
+    return `
+    ${params.includeIdJoins ? idJoinSQL : ""}
+    __rawExperiment AS (
+      ${compileSqlTemplate(exposureQuery.query, {
+        startDate: settings.startDate,
+        endDate: settings.endDate,
+        experimentId: settings.experimentId,
+        phase: settings.phase,
+        customFields: settings.customFields,
+      })}
+    ),
+    __experimentExposures AS (
+      -- Viewed Experiment
+      SELECT
+        e.${baseIdType} as ${baseIdType}
+        , ${this.castToString("e.variation_id")} as variation
+        , ${timestampDateTimeColumn} as timestamp
+        ${experimentDimensions
+          .map((d) => {
+            if (d.specifiedSlices?.length) {
+              return `, ${this.getDimensionInStatement(
+                d.id,
+                d.specifiedSlices,
+              )} AS dim_${d.id}`;
+            }
+            return `, e.${d.id} AS dim_${d.id}`;
+          })
+          .join("\n")}
+      FROM
+          __rawExperiment e
+      WHERE
+          e.experiment_id = '${settings.experimentId}'
+          AND ${timestampColumn} >= ${this.toTimestamp(startDate)}
+          ${
+            endDate
+              ? `AND ${timestampColumn} <= ${this.toTimestamp(endDate)}`
+              : ""
+          }
+          ${settings.queryFilter ? `AND (\n${settings.queryFilter}\n)` : ""}
+    )
+    ${
+      activationMetric
+        ? `, __activationMetric as (${this.getMetricCTE({
+            metric: activationMetric,
+            baseIdType,
+            idJoinMap,
+            startDate: this.getMetricStart(
+              settings.startDate,
+              getDelayWindowHours(activationMetric.windowSettings),
+              0,
+            ),
+            endDate: this.getMetricEnd(
+              [activationMetric],
+              settings.endDate,
+              overrideConversionWindows,
+            ),
+            experimentId: settings.experimentId,
+            phase: settings.phase,
+            customFields: settings.customFields,
+            factTableMap,
+          })})
+        `
+        : ""
+    }
+    ${
+      segment
+        ? `, __segment as (${this.getSegmentCTE(
+            segment,
+            baseIdType,
+            idJoinMap,
+            factTableMap,
+            {
+              startDate: settings.startDate,
+              endDate: settings.endDate,
+              experimentId: settings.experimentId,
+              phase: settings.phase,
+              customFields: settings.customFields,
+            },
+          )})`
+        : ""
+    }
+    ${unitDimensions
+      .map(
+        (d) =>
+          `, __dim_unit_${d.dimension.id} as (${this.getDimensionCTE(
+            d.dimension,
+            baseIdType,
+            idJoinMap,
+          )})`,
+      )
+      .join("\n")}
+    , __experimentUnits AS (
+      -- One row per user
+      SELECT
+        e.${baseIdType} AS ${baseIdType}
+        , ${
+          !!settings.banditSettings?.useFirstExposure && settings.banditSettings
+            ? this.getFirstVariationValuePerUnit()
+            : this.ifElse(
+                "count(distinct e.variation) > 1",
+                "'__multiple__'",
+                "max(e.variation)",
+              )
+        } AS variation
+        , MIN(${timestampColumn}) AS first_exposure_timestamp
+        ${unitDimensions
+          .map(
+            (d) => `
+          , ${this.getDimensionValuePerUnit(d)} AS dim_unit_${d.dimension.id}`,
+          )
+          .join("\n")}
+        ${experimentDimensions
+          .map(
+            (d) => `
+          , ${this.getDimensionValuePerUnit(d)} AS dim_exp_${d.id}`,
+          )
+          .join("\n")}
+        ${
+          activationMetric
+            ? `, MIN(${this.ifElse(
+                this.getConversionWindowClause(
+                  "e.timestamp",
+                  "a.timestamp",
+                  activationMetric,
+                  settings.endDate,
+                  overrideConversionWindows,
+                ),
+                "a.timestamp",
+                "NULL",
+              )}) AS first_activation_timestamp
+            `
+            : ""
+        }
+      FROM
+        __experimentExposures e
+        ${
+          segment
+            ? `JOIN __segment s ON (s.${baseIdType} = e.${baseIdType})`
+            : ""
+        }
+        ${unitDimensions
+          .map(
+            (d) => `
+            LEFT JOIN __dim_unit_${d.dimension.id} __dim_unit_${d.dimension.id} ON (
+              __dim_unit_${d.dimension.id}.${baseIdType} = e.${baseIdType}
+            )
+          `,
+          )
+          .join("\n")}
+        ${
+          activationMetric
+            ? `LEFT JOIN __activationMetric a ON (a.${baseIdType} = e.${baseIdType})`
+            : ""
+        }
+      WHERE (1 = 1)
+      ${segment ? `AND s.date <= e.timestamp` : ""}
+      ${this.getAggregateFilterMetricClause({metric: activationMetric})}
+      GROUP BY
+        e.${baseIdType} 
+    )`;
+  }
+
+  getBanditVariationPeriodWeights(
+    banditSettings: SnapshotBanditSettings,
+    variations: SnapshotSettingsVariation[],
+  ): VariationPeriodWeight[] | undefined {
+    let anyMissingValues = false;
+    const variationPeriodWeights = banditSettings.historicalWeights
+      .map((w) => {
+        return w.weights.map((weight, index) => {
+          const variationId = variations?.[index]?.id;
+          if (!variationId) {
+            anyMissingValues = true;
+          }
+          return { weight, variationId: variationId, date: w.date };
+        });
+      })
+      .flat();
+
+    if (anyMissingValues) {
+      return undefined;
+    }
+
+    return variationPeriodWeights;
+  }
+
+  getExperimentAggregateUnitsQuery(
+    params: ExperimentAggregateUnitsQueryParams,
+  ): string {
+    const { activationMetric, segment, settings, factTableMap, useUnitsTable } =
+      params;
+
+    const experimentDimensions = params.dimensions;
+
+    const exposureQuery = this.getExposureQuery(settings.exposureQueryId || "");
+
+    // get bandit data for SRM calculation
+    const banditDates = settings.banditSettings?.historicalWeights.map(
+      (w) => w.date,
+    );
+    const variationPeriodWeights = settings.banditSettings
+      ? this.getBanditVariationPeriodWeights(
+          settings.banditSettings,
+          settings.variations,
+        )
+      : undefined;
+
+    const computeBanditSrm = !!banditDates && !!variationPeriodWeights;
+
+    // Get any required identity join queries
+    const { baseIdType, idJoinSQL } = this.getIdentitiesCTE({
+      // add idTypes usually handled in units query here in the case where
+      // we don't have a separate table for the units query
+      // then for this query we just need the activation metric for activation
+      // dimensions
+      objects: [
+        [exposureQuery.userIdType],
+        !useUnitsTable && activationMetric
+          ? getUserIdTypes(activationMetric, factTableMap)
+          : [],
+        !useUnitsTable && segment ? [segment.userIdType || "user_id"] : [],
+      ],
+      from: settings.startDate,
+      to: settings.endDate,
+      forcedBaseIdType: exposureQuery.userIdType,
+      experimentId: settings.experimentId,
+    });
+
+    return format(
+      `-- Traffic Query for Health Tab
+    WITH
+      ${idJoinSQL}
+      ${
+        !useUnitsTable
+          ? `${this.getExperimentUnitsQuery({
+              ...params,
+              includeIdJoins: false,
+            })},`
+          : ""
+      }
+      __distinctUnits AS (
+        SELECT
+          ${baseIdType}
+          , variation
+          , ${this.formatDate(
+            this.dateTrunc("first_exposure_timestamp"),
+          )} AS dim_exposure_date
+          ${banditDates ? `${this.getBanditCaseWhen(banditDates)}` : ""}
+          ${experimentDimensions
+            .map(
+              (d) =>
+                `, ${this.getDimensionInStatement(
+                  `dim_exp_${d.id}`,
+                  d.specifiedSlices,
+                )} AS dim_exp_${d.id}`,
+            )
+            .join("\n")}
+          ${
+            activationMetric
+              ? `, ${this.ifElse(
+                  `first_activation_timestamp IS NULL`,
+                  "'Not Activated'",
+                  "'Activated'",
+                )} AS dim_activated`
+              : ""
+          }
+        FROM ${
+          useUnitsTable ? `${params.unitsTableFullName}` : "__experimentUnits"
+        }
+      )
+      , __unitsByDimension AS (
+        -- One row per variation per dimension slice
+        ${[
+          "dim_exposure_date",
+          ...experimentDimensions.map((d) => `dim_exp_${d.id}`),
+          ...(activationMetric ? ["dim_activated"] : []),
+        ]
+          .map((d) =>
+            this.getUnitCountCTE(
+              d,
+              activationMetric && d !== "dim_activated"
+                ? "WHERE dim_activated = 'Activated'"
+                : "",
+              // cast to float to union with bandit test statistic which is float
+              computeBanditSrm,
+            ),
+          )
+          .join("\nUNION ALL\n")}
+      )
+      ${
+        computeBanditSrm
+          ? `
+        , variationBanditPeriodWeights AS (
+          ${variationPeriodWeights
+            .map(
+              (w) => `
+            SELECT
+              ${this.castToString(`'${w.variationId}'`)} AS variation
+              , ${this.toTimestamp(w.date)} AS bandit_period
+              , ${w.weight} AS weight
+          `,
+            )
+            .join("\nUNION ALL\n")}
+        )
+        , __unitsByVariationBanditPeriod AS (
+          SELECT
+            v.variation AS variation
+            , v.bandit_period AS bandit_period
+            , v.weight AS weight
+            , COALESCE(COUNT(d.bandit_period), 0) AS units
+          FROM variationBanditPeriodWeights v
+          LEFT JOIN __distinctUnits d
+            ON (d.variation = v.variation AND d.bandit_period = v.bandit_period)
+          GROUP BY
+            v.variation
+            , v.bandit_period
+            , v.weight
+        )
+        , __totalUnitsByBanditPeriod AS (
+          SELECT
+            bandit_period
+            , SUM(units) AS total_units
+          FROM __unitsByVariationBanditPeriod
+          GROUP BY
+            bandit_period
+        )
+        , __expectedUnitsByVariationBanditPeriod AS (
+          SELECT
+            u.variation AS variation
+            , MAX(${this.castToString("''")}) AS constant
+            , SUM(u.units) AS units
+            , SUM(t.total_units * u.weight) AS expected_units
+          FROM __unitsByVariationBanditPeriod u
+          LEFT JOIN __totalUnitsByBanditPeriod t
+            ON (t.bandit_period = u.bandit_period)
+          WHERE
+            COALESCE(t.total_units, 0) > 0
+          GROUP BY
+            u.variation
+        )
+        , __banditSrm AS (
+          SELECT
+            MAX(${this.castToString("''")}) AS variation
+            , MAX(${this.castToString("''")}) AS dimension_value
+            , MAX(${this.castToString(
+              `'${BANDIT_SRM_DIMENSION_NAME}'`,
+            )}) AS dimension_name
+            , SUM(POW(expected_units - units, 2) / expected_units) AS units
+          FROM __expectedUnitsByVariationBanditPeriod
+          GROUP BY
+            constant
+        ),
+        __unitsByDimensionWithBanditSrm AS (
+          SELECT
+            *
+          FROM __unitsByDimension
+          UNION ALL
+          SELECT
+            *
+          FROM __banditSrm
+        )
+      `
+          : ""
+      }
+
+      ${this.selectStarLimit(
+        computeBanditSrm
+          ? "__unitsByDimensionWithBanditSrm"
+          : "__unitsByDimension",
+        MAX_ROWS_UNIT_AGGREGATE_QUERY,
+      )}
+    `,
+      this.getFormatDialect(),
+    );
+  }
+
+  getUnitCountCTE(
+    dimensionColumn: string,
+    whereClause?: string,
+    ensureFloat?: boolean,
+  ): string {
+    return ` -- ${dimensionColumn}
+    SELECT
+      variation AS variation
+      , ${dimensionColumn} AS dimension_value
+      , MAX(${this.castToString(`'${dimensionColumn}'`)}) AS dimension_name
+      , ${ensureFloat ? this.ensureFloat("COUNT(*)") : "COUNT(*)"} AS units
+    FROM
+      __distinctUnits
+    ${whereClause ?? ""}
+    GROUP BY
+      variation
+      , ${dimensionColumn}`;
+  }
+
+  getDimensionSlicesQuery(params: DimensionSlicesQueryParams): string {
+    const exposureQuery = this.getExposureQuery(params.exposureQueryId || "");
+
+    const { baseIdType } = getBaseIdTypeAndJoins([[exposureQuery.userIdType]]);
+
+    const startDate = subDays(new Date(), params.lookbackDays);
+    const timestampColumn = "e.timestamp";
+    return format(
+      `-- Dimension Traffic Query
+    WITH
+      __rawExperiment AS (
+        ${compileSqlTemplate(exposureQuery.query, {
+          startDate: startDate,
+        })}
+      ),
+      __experimentExposures AS (
+        -- Viewed Experiment
+        SELECT
+          e.${baseIdType} as ${baseIdType}
+          , e.timestamp
+          ${params.dimensions
+            .map((d) => `, e.${d.id} AS dim_${d.id}`)
+            .join("\n")}
+        FROM
+          __rawExperiment e
+        WHERE
+          ${timestampColumn} >= ${this.toTimestamp(startDate)}
+      ),
+      __distinctUnits AS (
+        SELECT
+          ${baseIdType}
+          ${params.dimensions
+            .map(
+              (d) => `
+            , ${this.getDimensionValuePerUnit(d)} AS dim_exp_${d.id}`,
+            )
+            .join("\n")}
+          , 1 AS variation
+        FROM
+          __experimentExposures e
+        GROUP BY
+          e.${baseIdType}
+      ),
+      -- One row per dimension slice
+      dim_values AS (
+        SELECT
+          1 AS variation
+          , ${this.castToString("''")} AS dimension_value
+          , ${this.castToString("''")} AS dimension_name
+          , COUNT(*) AS units
+        FROM
+          __distinctUnits
+        UNION ALL
+        ${params.dimensions
+          .map((d) => this.getUnitCountCTE(`dim_exp_${d.id}`))
+          .join("\nUNION ALL\n")}
+      ),
+      total_n AS (
+        SELECT
+          SUM(units) AS N
+        FROM dim_values
+        WHERE dimension_name = ''
+      ),
+      dim_values_sorted AS (
+        SELECT
+          dimension_name
+          , dimension_value
+          , units
+          , ROW_NUMBER() OVER (PARTITION BY dimension_name ORDER BY units DESC) as rn
+        FROM
+          dim_values
+        WHERE
+          dimension_name != ''
+      )
+      SELECT
+        dim_values_sorted.dimension_name AS dimension_name,
+        dim_values_sorted.dimension_value AS dimension_value,
+        dim_values_sorted.units AS units,
+        n.N AS total_units
+      FROM
+        dim_values_sorted
+      CROSS JOIN total_n n
+      WHERE 
+        rn <= 20
+    `,
+      this.getFormatDialect(),
+    );
+  }
+
+  async runDimensionSlicesQuery(
+    query: string,
+    setExternalId: ExternalIdCallback,
+  ): Promise<DimensionSlicesQueryResponse> {
+    const { rows, statistics } = await this.runQuery(query, setExternalId);
+    return {
+      rows: rows.map((row) => {
+        return {
+          dimension_value: row.dimension_value ?? "",
+          dimension_name: row.dimension_name ?? "",
+          units: parseIntWithDefault(row.units, 0),
+          total_units: parseIntWithDefault(row.total_units, 0),
+        };
+      }),
+      statistics: statistics,
+    };
+  }
+
+  getUserExperimentExposuresQuery(
+    params: UserExperimentExposuresQueryParams,
+  ): string {
+    const { userIdType } = params;
+    // Get all exposure queries that match the specified userIdType
+    const allExposureQueries = (
+      this.datasource.settings.queries?.exposure || []
+    )
+      .map(({ id }) => this.getExposureQuery(id))
+      .filter((query) => query.userIdType === userIdType); // Filter by userIdType
+
+    // Collect all unique dimension names across all exposure queries
+    const allDimensionNames = Array.from(
+      new Set(allExposureQueries.flatMap((query) => query.dimensions || [])),
+    );
+    const startDate = subDays(new Date(), params.lookbackDays);
+
+    return format(
+      `-- User Exposures Query
+      WITH __userExposures AS (
+        ${allExposureQueries
+          .map((exposureQuery, i) => {
+            // Get all available dimensions for this exposure query
+            const availableDimensions = exposureQuery.dimensions || [];
+            const tableAlias = `t${i}`;
+
+            // Create dimension columns for ALL possible dimensions
+            const dimensionSelects = allDimensionNames.map((dim) => {
+              if (availableDimensions.includes(dim)) {
+                return `${this.castToString(`${tableAlias}.${dim}`)} AS ${dim}`;
+              } else {
+                return `${this.castToString("null")} AS ${dim}`;
+              }
+            });
+
+            const dimensionSelectString = dimensionSelects.join(", ");
+
+            return `
+              SELECT timestamp, experiment_id, variation_id, ${dimensionSelectString} FROM (
+                ${compileSqlTemplate(exposureQuery.query, {
+                  startDate: startDate,
+                })}
+              ) ${tableAlias}
+              WHERE ${this.castToString(exposureQuery.userIdType)} = '${params.unitId}' AND timestamp >= ${this.toTimestamp(startDate)}
+            `;
+          })
+          .join("\nUNION ALL\n")}
+      )
+      SELECT * FROM __userExposures 
+      ORDER BY timestamp DESC 
+      LIMIT ${SQL_ROW_LIMIT}
+      `,
+      this.getFormatDialect(),
+    );
+  }
+
+  getFeatureEvalDiagnosticsQuery(
+    params: FeatureEvalDiagnosticsQueryParams,
+  ): string {
+    const featureKey = this.escapeStringLiteral(params.feature);
+    const oneWeekAgo = subDays(new Date(), 7);
+
+    // We only support one feature usage query per data source for now
+    // Always use the first query in the array for now
+    const featureEvalQuery = this.datasource.settings?.queries?.featureUsage
+      ? this.datasource.settings.queries.featureUsage[0].query
+      : "";
+
+    const compiledFeatureEvalQuery = compileSqlTemplate(featureEvalQuery, {
+      startDate: oneWeekAgo,
+    });
+
+    return format(
+      `-- Feature Evaluation Diagnostics Query
+      WITH __featureEvalQuery AS (
+        ${compiledFeatureEvalQuery}
+      )
+      SELECT * FROM __featureEvalQuery
+      WHERE feature_key = '${featureKey}' AND timestamp >= ${this.toTimestamp(oneWeekAgo)}
+      ORDER BY timestamp DESC
+      LIMIT 100
+      `,
+      this.getFormatDialect(),
+    );
+  }
+
   public async runUserExperimentExposuresQuery(
     query: string,
   ): Promise<UserExperimentExposuresQueryResponse> {
-    const { rows, statistics } = await this.runQuery(query, undefined, {
-      queryType: "userExposure",
-    });
+    const { rows, statistics } = await this.runQuery(query);
 
     // Check if SQL_ROW_LIMIT was reached
     const truncated = rows.length === SQL_ROW_LIMIT;
@@ -1177,20 +1770,85 @@ export default abstract class SqlIntegration
     }
   }
 
-  getAutoGeneratedMetricSqlQuery(
-    eventName: string,
-    hasUserId: boolean,
-    schemaFormat: AutoFactTableSchemas,
-    type: MetricType,
-    schema?: string,
-  ): string {
-    return getAutoGeneratedMetricSqlQueryFromSql(
-      this.getSqlDialect(),
-      this.getSchemaFormatConfig(schemaFormat),
-      eventName,
-      hasUserId,
-      type,
-      schema,
+    // BQ datetime cast for SELECT statements (do not use for where)
+    const timestampDateTimeColumn = this.castUserDateCol(cols.timestamp);
+
+    const schema = this.getSchema();
+
+    const where: string[] = [];
+    let sql = "";
+
+    // From old, deprecated query builder UI
+    if (queryFormat === "builder" && !isFact && metric.conditions?.length) {
+      metric.conditions.forEach((c) => {
+        where.push(`m.${c.column} ${c.operator} '${c.value}'`);
+      });
+    }
+
+    // Add filters from the Metric
+    if (isFact && factTable && columnRef) {
+      const sliceInfo = parseSliceMetricId(metric.id);
+      getColumnRefWhereClause({
+        factTable,
+        columnRef,
+        escapeStringLiteral: this.escapeStringLiteral.bind(this),
+        jsonExtract: this.extractJSONField.bind(this),
+        evalBoolean: this.evalBoolean.bind(this),
+        sliceInfo,
+      }).forEach((filterSQL) => {
+        where.push(filterSQL);
+      });
+
+      sql = factTable.sql;
+    }
+
+    if (!isFact && queryFormat === "sql") {
+      sql = metric.sql || "";
+    }
+
+    // Add date filter
+    if (startDate) {
+      where.push(`${cols.timestamp} >= ${this.toTimestamp(startDate)}`);
+    }
+    if (endDate) {
+      where.push(`${cols.timestamp} <= ${this.toTimestamp(endDate)}`);
+    }
+
+    const aggregateFilterMetricColumn = this.getAggregateFilterMetricColumn({metric: metric});
+        
+    return compileSqlTemplate(
+      `-- Metric (${metric.name})
+      SELECT
+        ${userIdCol} as ${baseIdType},
+        ${cols.value} as value,
+        ${timestampDateTimeColumn} as timestamp
+        ${aggregateFilterMetricColumn ? ', ' + aggregateFilterMetricColumn + ' as aggregate_filter_metric_value' : ''}
+      FROM
+        ${
+          queryFormat === "sql" || queryFormat === "fact"
+            ? `(
+              ${sql}
+            )`
+            : !isFact
+              ? (schema && !metric.table?.match(/\./) ? schema + "." : "") +
+                (metric.table || "")
+              : ""
+        } m
+        ${join}
+        ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
+    `,
+      {
+        startDate,
+        endDate: endDate || undefined,
+        experimentId,
+        phase,
+        customFields,
+        templateVariables: getMetricTemplateVariables(
+          metric,
+          factTableMap,
+          useDenominator,
+        ),
+      },
     );
   }
 
@@ -1332,11 +1990,174 @@ export default abstract class SqlIntegration
     `;
   }
 
-  async getAutoMetricsToCreate(
-    existingMetrics: MetricInterface[],
-    schema: string,
-  ): Promise<AutoMetricTrackedEvent[]> {
-    const schemaFormat = this.datasource.settings.schemaFormat;
+  private addCaseWhenTimeFilter({
+    col,
+    metric,
+    overrideConversionWindows,
+    endDate,
+    metricQuantileSettings,
+    metricTimestampColExpr,
+    exposureTimestampColExpr,
+  }: {
+    col: string;
+    metric: ExperimentMetricInterface;
+    overrideConversionWindows: boolean;
+    endDate: Date;
+    metricQuantileSettings?: MetricQuantileSettings;
+    metricTimestampColExpr: string;
+    exposureTimestampColExpr: string;
+  }): string {
+    return `${this.ifElse(
+      `${this.getConversionWindowClause(
+        exposureTimestampColExpr,
+        metricTimestampColExpr,
+        metric,
+        endDate,
+        overrideConversionWindows,
+      )}
+        ${metricQuantileSettings?.ignoreZeros && metricQuantileSettings?.type === "event" ? `AND ${col} != 0` : ""}
+      `,
+      `${col}`,
+      `NULL`,
+    )}`;
+  }
+
+  private getAggregateMetricColumnLegacyMetrics({
+    metric,
+  }: {
+    metric: MetricInterface;
+  }) {
+    // Binomial metrics don't have a value, so use hard-coded "1" as the value
+    if (metric.type === "binomial") {
+      return `MAX(COALESCE(value, 0))`;
+    }
+
+    // SQL editor
+    if (this.getMetricQueryFormat(metric) === "sql") {
+      // Custom aggregation that's a hardcoded number (e.g. "1")
+      if (metric.aggregation && Number(metric.aggregation)) {
+        // Note that if user has conversion row but value IS NULL, this will
+        // return 0 for that user rather than `metric.aggregation`
+        return this.ifElse("value IS NOT NULL", metric.aggregation, "0");
+      }
+      // Other custom aggregation
+      else if (metric.aggregation) {
+        return replaceCountStar(metric.aggregation, `value`);
+      }
+      // Standard aggregation (SUM)
+      else {
+        return `SUM(COALESCE(value, 0))`;
+      }
+    }
+    // Query builder
+    else {
+      // Count metrics that specify a distinct column to count
+      if (metric.type === "count" && metric.column) {
+        return `COUNT(DISTINCT (value))`;
+      }
+      // Count metrics just do a simple count of rows by default
+      else if (metric.type === "count") {
+        return `COUNT(value)`;
+      }
+      // Revenue and duration metrics use MAX by default
+      else {
+        return `MAX(COALESCE(value, 0))`;
+      }
+    }
+  }
+
+  private getAggregateFilterMetricColumn({
+    metric,
+    useDenominator,
+  }: {
+    metric: ExperimentMetricInterface | null;
+    useDenominator?: boolean;
+  }) {
+    // Fact Metrics
+    if (metric && isFactMetric(metric)) {
+      const columnRef = useDenominator ? metric.denominator : metric.numerator;
+
+      if (columnRef?.aggregateFilterColumn) {
+        return columnRef?.aggregateFilterColumn === "$$count"
+            ? `sum(1) over (
+                    partition by user_id 
+                    order by timestamp asc
+                    rows between unbounded preceding and current row
+                  )`
+            : `sum(${columnRef?.aggregateFilterColumn}) over (
+                    partition by user_id 
+                    order by timestamp asc
+                    rows between unbounded preceding and current row
+                  )`
+      }
+    }
+  }
+
+  private getAggregateFilterMetricClause({
+    metric,
+    useDenominator,
+  }: {
+    metric: ExperimentMetricInterface | null;
+    useDenominator?: boolean;
+  }) {
+    // Fact Metrics
+    if (metric && isFactMetric(metric)) {
+      const columnRef = useDenominator ? metric.denominator : metric.numerator;
+
+      const aggregateFilter =
+        getAggregateFilters({
+            columnRef: columnRef,
+            column: `aggregate_filter_metric_value`,
+            ignoreInvalid: true,
+        });
+
+      return aggregateFilter.length > 0 ? 'AND ' + aggregateFilter.join(' AND ') : ""
+    } else {
+      return ""
+    }
+  }
+
+  private getFactMetricColumn(
+    metric: FactMetricInterface,
+    columnRef: ColumnRef,
+    factTable: FactTableInterface,
+    alias = "m",
+  ): { timestamp: string; value: string } {
+    const hasAggregateFilter =
+      getAggregateFilters({
+        columnRef: columnRef,
+        column: columnRef?.column || "",
+        ignoreInvalid: true,
+      }).length > 0;
+
+    const column = hasAggregateFilter
+      ? columnRef?.aggregateFilterColumn
+      : columnRef?.column;
+
+    const timestampColumn = `${alias}.timestamp`;
+
+    const value =
+      (!hasAggregateFilter && isBinomialMetric(metric)) ||
+      !columnRef ||
+      column === "$$distinctUsers" ||
+      column === "$$count"
+        ? "1"
+        : column === "$$distinctDates"
+          ? this.dateTrunc(timestampColumn)
+          : factTable && column
+            ? getColumnExpression(
+                column,
+                factTable,
+                this.extractJSONField.bind(this),
+                alias,
+              )
+            : `${alias}.${column}`;
+
+    return {
+      timestamp: timestampColumn,
+      value,
+    };
+  }
 
     if (
       schemaFormat &&
