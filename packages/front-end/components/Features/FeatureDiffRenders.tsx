@@ -25,7 +25,7 @@ import Heading from "@/ui/Heading";
 import Link from "@/ui/Link";
 import Badge from "@/ui/Badge";
 import { useExperiments } from "@/hooks/useExperiments";
-import { useHoldouts } from "@/hooks/useHoldouts";
+import { useHoldouts, holdoutOccupiesRuleSlot } from "@/hooks/useHoldouts";
 import { useEnvironments } from "@/services/features";
 import Tooltip from "@/components/Tooltip/Tooltip";
 import {
@@ -234,6 +234,41 @@ export function isSimpleRampAction(action: RevisionRampCreateAction): boolean {
   return action.steps.length === 0;
 }
 
+// Format a date as "Mon DD, YYYY at H:MM AM" — used in diff-summary bodies for
+// simple schedules so reviewers see the time-of-day (the auto-generated
+// schedule name in the title only carries date granularity).
+export function fmtScheduleSummaryDateTime(
+  d: string | Date | null | undefined,
+): string | null {
+  if (!d) return null;
+  const parsed = d instanceof Date ? d : new Date(d);
+  if (Number.isNaN(parsed.getTime())) return null;
+  const date = parsed.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+  const time = parsed.toLocaleTimeString(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+  });
+  return `${date} at ${time}`;
+}
+
+// Body text for the "enables {datetime} / disables {datetime}" portion of a
+// simple-schedule diff card. Returns null if neither endpoint is set.
+export function formatSimpleWindow(
+  startDate: string | Date | null | undefined,
+  endAt: string | Date | null | undefined,
+): string | null {
+  const start = fmtScheduleSummaryDateTime(startDate);
+  const end = fmtScheduleSummaryDateTime(endAt);
+  if (start && end) return `enables ${start}, disables ${end}`;
+  if (start) return `enables ${start}`;
+  if (end) return `disables ${end}`;
+  return null;
+}
+
 function extractScheduledEndAt(
   endCondition: RevisionRampCreateAction["endCondition"],
 ): Date | string | null {
@@ -285,6 +320,27 @@ export function PendingPublishBadge() {
       radius="full"
       size="sm"
     />
+  );
+}
+
+// Action label rendered next to a schedule/ramp diff title so reviewers can
+// tell at a glance which lifecycle event the row represents (a draft create,
+// the activation of an existing pending schedule, or a pending detach).
+type RampDiffAction = "create" | "activate" | "remove";
+
+const RAMP_ACTION_STYLE: Record<
+  RampDiffAction,
+  { label: string; color: "amber" | "green" | "red" }
+> = {
+  create: { label: "Create", color: "amber" },
+  activate: { label: "Activate", color: "green" },
+  remove: { label: "Remove", color: "red" },
+};
+
+export function RampActionLabel({ action }: { action: RampDiffAction }) {
+  const { label, color } = RAMP_ACTION_STYLE[action];
+  return (
+    <Badge label={label} color={color} variant="soft" radius="full" size="sm" />
   );
 }
 
@@ -353,14 +409,6 @@ export function CreatedRampScheduleBody({
   return (
     <RampActionBody action={action} targetRuleIndices={targetRuleIndices} />
   );
-}
-
-export function createdRampScheduleTitle(
-  action: RevisionRampCreateAction,
-): string {
-  return isSimpleRampAction(action)
-    ? "Create Schedule"
-    : "Create Ramp Schedule";
 }
 
 export function findPendingRampForRule(
@@ -956,6 +1004,25 @@ export function logBadgeColor(
   if (action === "Approved") return "green";
   if (action === "Requested Changes") return "red";
   if (action === "Review Requested") return "amber";
+
+  // Handle common diff actions
+  const lowerAction = action.toLowerCase();
+  if (lowerAction.includes("add") || lowerAction.includes("enable"))
+    return "green";
+  if (
+    lowerAction.includes("delete") ||
+    lowerAction.includes("remove") ||
+    lowerAction.includes("disable")
+  )
+    return "red";
+  if (
+    lowerAction.includes("edit") ||
+    lowerAction.includes("change") ||
+    lowerAction.includes("update") ||
+    lowerAction.includes("reorder")
+  )
+    return "amber";
+
   return "gray";
 }
 
@@ -1250,10 +1317,15 @@ export function renderFeatureDefaultValueSection(
 
 // Rules section: per-env enable-toggle rows + a single rules diff off the
 // flat `feature.rules` array. Each rule card carries its env scope inline.
-export function renderFeatureRulesSection(
-  pre: FeaturePartial,
-  post: Partial<FeatureInterface>,
-): ReactNode | null {
+function FeatureRulesSection({
+  pre,
+  post,
+}: {
+  pre: FeaturePartial;
+  post: Partial<FeatureInterface>;
+}): ReactElement | null {
+  const { holdoutsMap } = useHoldouts();
+
   const preEnvs = (pre?.environmentSettings ?? {}) as Record<
     string,
     FeatureEnvironment
@@ -1293,8 +1365,11 @@ export function renderFeatureRulesSection(
   const rulesChanged = !isEqual(preRules, postRules);
   const rulesRender = rulesChanged
     ? renderFeatureRules(preRules, postRules, {
-        preHasHoldout: !!pre?.holdout,
-        postHasHoldout: !!post.holdout,
+        // Match Rule.tsx numbering: the holdout occupies slot #1 only when
+        // it's actually enabled in some env (see `liveHoldoutActiveAnyEnv`
+        // in FeatureRules.tsx).
+        preHasHoldout: holdoutOccupiesRuleSlot(pre?.holdout, holdoutsMap),
+        postHasHoldout: holdoutOccupiesRuleSlot(post.holdout, holdoutsMap),
       })
     : null;
 
@@ -1322,23 +1397,53 @@ export function renderFeatureRulesSection(
   );
 }
 
+// `renderFeatureRulesSection` is invoked as an `AuditDiffSection.render`
+// callback; wrap the component so call sites stay function-shaped.
+export function renderFeatureRulesSection(
+  pre: FeaturePartial,
+  post: Partial<FeatureInterface>,
+): ReactNode | null {
+  return <FeatureRulesSection pre={pre} post={post} />;
+}
+
+// True when the archived flag meaningfully changed. Treats `undefined` as
+// `false` so legacy audit events (archived field absent) don't register as a
+// change. Shared by the render and badge paths so they can never drift.
+export function featureArchivedChanged(
+  pre: boolean | undefined,
+  post: boolean | undefined,
+): boolean {
+  return post !== undefined && (pre ?? false) !== (post ?? false);
+}
+
+// Renders a single "active → archived" change row. Shared by the audit-history
+// Settings section and the draft/review "Archive status" diff so both views
+// represent an archive change identically. Returns null when unchanged.
+export function renderFeatureArchived(
+  pre: boolean | undefined,
+  post: boolean | undefined,
+): ReactElement | null {
+  if (!featureArchivedChanged(pre, post)) return null;
+  return (
+    <ChangeField
+      key="archived"
+      label="Archived"
+      changed
+      oldNode={(pre ?? false) ? "archived" : "active"}
+      newNode={post ? "archived" : "active"}
+    />
+  );
+}
+
 export function renderFeatureMetadataSection(
   pre: FeaturePartial,
   post: Partial<FeatureInterface>,
 ): ReactNode | null {
   const rows: ReactNode[] = [];
 
-  if (!isEqual(pre?.archived, post.archived) && post.archived !== undefined) {
-    const wasArchived = pre?.archived ?? false;
-    rows.push(
-      <ChangeField
-        key="archived"
-        label="Archived"
-        changed
-        oldNode={wasArchived ? "archived" : "active"}
-        newNode={post.archived ? "archived" : "active"}
-      />,
-    );
+  const archivedRow = renderFeatureArchived(pre?.archived, post.archived);
+  if (archivedRow) {
+    rows.push(archivedRow);
   }
 
   if ((pre?.owner || "") !== (post.owner || "") && post.owner !== undefined) {
@@ -1420,7 +1525,7 @@ export function getFeatureMetadataBadges(
   post: Partial<FeatureInterface>,
 ): DiffBadge[] {
   const badges: DiffBadge[] = [];
-  if (!isEqual(pre?.archived, post.archived) && post.archived !== undefined) {
+  if (featureArchivedChanged(pre?.archived, post.archived)) {
     badges.push({
       label: post.archived ? "Archived" : "Unarchived",
       action: "archive",
