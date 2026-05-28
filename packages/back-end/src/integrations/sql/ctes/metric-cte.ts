@@ -10,6 +10,10 @@ import type { PhaseSQLVar, SqlDialect } from "shared/types/sql";
 import { compileSqlTemplate } from "back-end/src/util/sql";
 import type { FactTableMap } from "back-end/src/models/FactTableModel";
 
+import {
+  getAggregateFilterMetricColumn,
+  getAggregateFilterMetricColumnAlias,
+} from "back-end/src/integrations/sql/columns/aggregate-filter-metric-column";
 import { getMetricColumns } from "back-end/src/integrations/sql/columns/metric-columns";
 import { getMetricQueryFormat } from "back-end/src/integrations/sql/fact-metrics/metric-query-format";
 
@@ -133,12 +137,24 @@ export function getMetricCTE(
     where.push(`${cols.timestamp} <= ${dialect.toTimestamp(endDate)}`);
   }
 
+  const aggregateFilterMetricColumn = getAggregateFilterMetricColumn({
+    metric,
+    userIdCol,
+    timestampCol: cols.timestamp,
+    useDenominator,
+  });
+
   return compileSqlTemplate(
     `-- Metric (${metric.name})
       SELECT
         ${userIdCol} as ${baseIdType},
         ${cols.value} as value,
-        ${timestampDateTimeColumn} as timestamp
+        ${timestampDateTimeColumn} as timestamp${
+          aggregateFilterMetricColumn
+            ? `,
+        ${aggregateFilterMetricColumn} as ${getAggregateFilterMetricColumnAlias()}`
+            : ""
+        }
       FROM
         ${
           queryFormat === "sql" || queryFormat === "fact"
