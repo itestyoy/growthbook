@@ -4,6 +4,7 @@ import type { ExperimentUnitsQueryParams } from "shared/types/integrations";
 import type { SqlDialect } from "shared/types/sql";
 import { compileSqlTemplate } from "back-end/src/util/sql";
 
+import { getAggregateFilterMetricConditions } from "back-end/src/integrations/sql/columns/aggregate-filter-metric-column";
 import { getConversionWindowClause } from "back-end/src/integrations/sql/clauses/conversion-window-clause";
 import { getDimensionCTE } from "back-end/src/integrations/sql/ctes/dimension-cte";
 import { getDimensionInStatement } from "back-end/src/integrations/sql/fact-metrics/dimension-in-statement";
@@ -74,6 +75,20 @@ export function getExperimentUnitsQuery(
   const overrideConversionWindows =
     settings.attributionModel === "experimentDuration" ||
     settings.attributionModel === "lookbackOverride";
+
+  const experimentUnitsWhereParts: string[] = [];
+  if (segment) experimentUnitsWhereParts.push("s.date <= e.timestamp");
+  if (activationMetric) {
+    experimentUnitsWhereParts.push(
+      ...getAggregateFilterMetricConditions({
+        metric: activationMetric,
+        alias: "a",
+      }),
+    );
+  }
+  const experimentUnitsWhere = experimentUnitsWhereParts.length
+    ? `WHERE ${experimentUnitsWhereParts.join(" AND ")}`
+    : "";
 
   return `
     ${params.includeIdJoins ? idJoinSQL : ""}
@@ -236,7 +251,7 @@ export function getExperimentUnitsQuery(
             ? `LEFT JOIN __activationMetric a ON (a.${baseIdType} = e.${baseIdType})`
             : ""
         }
-      ${segment ? `WHERE s.date <= e.timestamp` : ""}
+      ${experimentUnitsWhere}
       GROUP BY
         e.${baseIdType}
     )`;
