@@ -26,7 +26,7 @@ import cloneDeep from "lodash/cloneDeep";
 import {
   featureHasEnvironment,
   generateVariationId,
-  getMatchingRules,
+  getNewDraftExperimentsToPublish,
   getRulesForEnvironment,
   validateAndFixCondition,
   validateFeatureValue,
@@ -198,6 +198,10 @@ export function useFeatureSearch({
   environmentStatus,
   draftStates,
   staleStates,
+  rampStates,
+  dependencyIndex,
+  experimentStates,
+  contentSearchPrefixes = [],
 }: {
   allFeatures: FeatureInterface[];
   defaultSortField?:
@@ -220,7 +224,18 @@ export function useFeatureSearch({
       envResults?: Record<string, { stale: boolean }>;
     }
   >;
+  rampStates?: Record<string, unknown>;
+  dependencyIndex?: Set<string> | null;
+  experimentStates?: Record<string, { hasTempRollout: boolean }>;
+  contentSearchPrefixes?: string[];
 }) {
+  const syntaxFilterPassthrough = useCallback(
+    (field: string, value: string) => {
+      if (field !== "has") return false;
+      return contentSearchPrefixes.some((prefix) => value.startsWith(prefix));
+    },
+    [contentSearchPrefixes],
+  );
   const { getOwnerDisplay } = useUser();
   const { getProjectById } = useDefinitions();
 
@@ -245,6 +260,7 @@ export function useFeatureSearch({
     defaultSortField: defaultSortField,
     searchFields: ["id^3", "description"],
     filterResults,
+    syntaxFilterPassthrough,
     updateSearchQueryOnChange: true,
     localStorageKey: localStorageKey,
     searchTermFilters: {
@@ -276,11 +292,17 @@ export function useFeatureSearch({
           );
           if (hasSomeStaleEnvs) has.push("stale-env");
         }
-
-        // TODO: restore has:experiment/rollout/force/rule/prerequisites/savedgroup filters
-        // once rules are denormalized to a top-level rules[] field with an `environments`
-        // property (collapsing per-environment rules into a single scannable array).
-
+        const meta = item as FeatureInterface & {
+          hasPrerequisites?: boolean;
+          hasSavedGroups?: boolean;
+        };
+        if (meta.hasPrerequisites) has.push("prerequisites");
+        if (meta.hasSavedGroups) has.push("savedgroup", "savedgroups");
+        if (item.linkedExperiments?.length) has.push("experiments");
+        if (rampStates?.[item.id]) has.push("ramp-schedule");
+        if (dependencyIndex?.has(item.id)) has.push("dependents");
+        const expState = experimentStates?.[item.id];
+        if (expState?.hasTempRollout) has.push("temp-rollout");
         return has;
       },
       key: (item) => item.id,
@@ -872,6 +894,7 @@ export function getDefaultRuleValue({
   settings,
   datasources,
   isSafeRolloutAutoRollbackEnabled = false,
+  defaultHashVersion = 1,
 }: {
   defaultValue: string;
   attributeSchema?: SDKAttributeSchema;
@@ -879,6 +902,8 @@ export function getDefaultRuleValue({
   settings?: OrganizationSettings;
   datasources?: DataSourceInterfaceWithParams[];
   isSafeRolloutAutoRollbackEnabled?: boolean;
+  /** Safe default hash version for new rules — pass `hasSDKWithNoBucketingV2 ? 1 : 2` at the call site. Defaults to 1 (safest). */
+  defaultHashVersion?: 1 | 2;
 }): FeatureRule | NewExperimentRefRule | safeRolloutFields {
   const hashAttributes =
     attributeSchema?.filter((a) => a.hashAttribute)?.map((a) => a.property) ||
@@ -903,6 +928,7 @@ export function getDefaultRuleValue({
       condition: "",
       enabled: true,
       hashAttribute,
+      hashVersion: defaultHashVersion,
       scheduleRules: [
         {
           enabled: true,
@@ -1066,45 +1092,6 @@ export function getDefaultRuleValue({
     };
   }
   throw new Error("Unknown Rule Type: " + ruleType);
-}
-
-export function getUnreachableRuleIndex(
-  rules: FeatureRule[],
-  experimentsMap: Map<string, ExperimentInterfaceStringDates>,
-) {
-  for (let i = 0; i < rules.length; i++) {
-    const rule = rules[i];
-
-    // Skip over inactive rules
-    if (isRuleInactive(rule, experimentsMap)) continue;
-
-    // Skip rules that are conditional based on a schedule
-    const upcomingScheduleRule = getUpcomingScheduleRule(rule);
-    if (upcomingScheduleRule && upcomingScheduleRule.timestamp) {
-      continue;
-    }
-
-    // Skip rules with targeting conditions
-    if (rule.condition && rule.condition !== "{}") {
-      continue;
-    }
-    if (rule.savedGroups?.length) {
-      continue;
-    }
-    if (rule.prerequisites?.length) {
-      continue;
-    }
-
-    // Only force rules and 100%-coverage rollouts consume all traffic
-    const isFullCoverage =
-      rule.type === "force" || (rule.type === "rollout" && rule.coverage >= 1);
-    if (!isFullCoverage) continue;
-
-    return i + 1;
-  }
-
-  // No unreachable rules
-  return 0;
 }
 
 export function jsonToConds(
@@ -1693,64 +1680,6 @@ export function genDuplicatedKey({ id }: FeatureInterface) {
     // we failed, let the user name the key
     return "";
   }
-}
-
-export function getNewDraftExperimentsToPublish({
-  environments,
-  feature,
-  revision,
-  experimentsMap,
-}: {
-  feature: FeatureInterface;
-  revision: FeatureRevisionInterface;
-  environments: Environment[];
-  experimentsMap: Map<string, ExperimentInterfaceStringDates>;
-}) {
-  const environmentIds = environments.map((e) => e.id);
-
-  const liveExperimentIds = new Set(
-    getMatchingRules(
-      feature,
-      (rule) => rule.type === "experiment-ref",
-      environmentIds,
-    ).map((result) => (result.rule as ExperimentRefRule).experimentId),
-  );
-
-  function isExp(
-    exp: ExperimentInterfaceStringDates | undefined,
-  ): exp is ExperimentInterfaceStringDates {
-    return !!exp;
-  }
-
-  const draftExperiments = getMatchingRules(
-    feature,
-    (rule) => {
-      if (rule.enabled === false) return false;
-      if (rule.type !== "experiment-ref") return false;
-
-      const exp = experimentsMap.get(rule.experimentId);
-      if (!exp) return false;
-
-      // Skip experiment rules that are already live
-      if (liveExperimentIds.has(rule.experimentId)) return false;
-
-      if (exp.status !== "draft") return false;
-      if (exp.archived) return false;
-
-      // Skip experiments with visual changesets. Those need to be started from the experiment page
-      if (exp.hasVisualChangesets) return false;
-
-      return true;
-    },
-    environmentIds,
-    revision,
-  )
-    .map((result) =>
-      experimentsMap.get((result.rule as ExperimentRefRule).experimentId),
-    )
-    .filter(isExp);
-
-  return [...new Set(draftExperiments)];
 }
 
 // Returns experiments whose draft rules would go live when this revision is published.

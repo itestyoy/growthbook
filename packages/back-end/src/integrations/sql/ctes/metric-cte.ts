@@ -115,6 +115,7 @@ export function getMetricCTE(
       factTable,
       columnRef,
       escapeStringLiteral: dialect.escapeStringLiteral,
+      stringMatch: dialect.stringMatch,
       jsonExtract: dialect.jsonExtract,
       evalBoolean: dialect.evalBoolean,
       sliceInfo,

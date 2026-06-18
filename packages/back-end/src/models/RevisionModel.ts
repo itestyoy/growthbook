@@ -9,6 +9,7 @@ import {
   JsonPatchOperation,
   getApprovalFlowSettings,
 } from "shared/enterprise";
+import { ACTIVE_DRAFT_STATUSES, ActiveDraftStatus } from "shared/validators";
 import type { CreateProps, UpdateProps } from "shared/types/base-model";
 import { MakeModelClass } from "back-end/src/models/BaseModel";
 import { getAdapter } from "back-end/src/revisions/index";
@@ -540,7 +541,11 @@ export class RevisionModel extends BaseClass {
 
   // Review
 
-  async submitForReview(id: string, userId: string) {
+  async submitForReview(
+    id: string,
+    userId: string,
+    { autoPublishOnApproval }: { autoPublishOnApproval?: boolean } = {},
+  ) {
     const existing = await this.getById(id);
     if (!existing) throw new Error("Revision not found");
 
@@ -559,6 +564,14 @@ export class RevisionModel extends BaseClass {
 
     return this.update(existing, {
       status: "pending-review",
+      autoPublishOnApproval: !!autoPublishOnApproval,
+      // The auto-publish runs with the arming user's authority. A stale
+      // value from a previous cycle is harmless — `autoPublishOnApproval`
+      // gates everything. `userId` is empty for API-key actors; skip so the
+      // publish falls back to `authorId`.
+      ...(autoPublishOnApproval && userId
+        ? { autoPublishEnabledBy: userId }
+        : {}),
       activityLog: [
         ...this.cleanActivityLog(existing.activityLog),
         {
@@ -577,23 +590,37 @@ export class RevisionModel extends BaseClass {
     } as UpdateProps<Revision>);
   }
 
+  // Arm/disarm auto-publish-on-approval after a draft has already been
+  // submitted for review (the submit-for-review path handles the draft case).
+  async setAutoPublishOnApproval(id: string, userId: string, enabled: boolean) {
+    const existing = await this.getById(id);
+    if (!existing) throw new Error("Revision not found");
+
+    if (
+      !["draft", "pending-review", "changes-requested", "approved"].includes(
+        existing.status,
+      )
+    ) {
+      throw new Error(
+        "Cannot change auto-publish on a published or discarded revision",
+      );
+    }
+
+    // Auto-publish runs with the arming user's authority. A stale
+    // autoPublishEnabledBy left behind when disabling is harmless —
+    // autoPublishOnApproval gates everything.
+    return this.update(existing, {
+      autoPublishOnApproval: enabled,
+      ...(enabled && userId ? { autoPublishEnabledBy: userId } : {}),
+    } as UpdateProps<Revision>);
+  }
+
   async addReview(
     id: string,
     userId: string,
     decision: ReviewDecision,
     comment: string,
   ) {
-    const existing = await this.getById(id);
-    if (!existing) throw new Error("Revision not found");
-
-    const review = {
-      id: uniqid("rev_"),
-      userId,
-      decision,
-      ...(comment ? { comment } : {}),
-      dateCreated: new Date(),
-    };
-
     const actionMap: Record<
       ReviewDecision,
       "approved" | "requested-changes" | "commented"
@@ -603,27 +630,80 @@ export class RevisionModel extends BaseClass {
       comment: "commented",
     };
 
-    const newStatus =
-      decision === "approve"
-        ? "approved"
-        : decision === "request-changes"
-          ? "changes-requested"
-          : existing.status;
+    // Build these once so CAS retries re-base the same entry, not a duplicate.
+    const review = {
+      id: uniqid("rev_"),
+      userId,
+      decision,
+      ...(comment ? { comment } : {}),
+      dateCreated: new Date(),
+    };
+    const activityEntry: ActivityLogEntry = {
+      id: uniqid("act_"),
+      userId,
+      action: actionMap[decision],
+      ...(comment ? { description: comment } : {}),
+      dateCreated: new Date(),
+    };
 
-    return this.update(existing, {
-      reviews: [...existing.reviews, review],
-      status: newStatus,
-      activityLog: [
-        ...this.cleanActivityLog(existing.activityLog),
-        {
-          id: uniqid("act_"),
-          userId,
-          action: actionMap[decision],
-          ...(comment ? { description: comment } : {}),
-          dateCreated: new Date(),
-        },
-      ],
-    } as UpdateProps<Revision>);
+    // CAS-guard the status reconcile so a concurrent verdict can't be lost.
+    const updated = await this.updateWithCas(
+      id,
+      ["reviews", "status", "activityLog"],
+      (existing) => {
+        // Re-checked under CAS: a verdict must not resurrect a revision that was
+        // merged or discarded concurrently with this review.
+        if (existing.status === "merged" || existing.status === "discarded") {
+          throw new Error(`Cannot review a ${existing.status} revision`);
+        }
+
+        // Verdicts only stand for the current review cycle. Transitions that
+        // invalidate prior verdicts (submit for review, approval reset on
+        // content edit, reopen) log a "reopened" activity entry, so reviews
+        // before the latest one are history, not active approvals/blocks.
+        let cycleStart: Date | null = null;
+        for (const entry of existing.activityLog) {
+          if (
+            entry.action === "reopened" &&
+            (cycleStart === null || entry.dateCreated > cycleStart)
+          ) {
+            cycleStart = entry.dateCreated;
+          }
+        }
+
+        // Latest verdict per reviewer within the cycle; comments carry none.
+        const verdictByReviewer = new Map<string, ReviewDecision>();
+        for (const r of [...existing.reviews, review]) {
+          if (r.decision === "comment") continue;
+          if (cycleStart !== null && r.dateCreated < cycleStart) continue;
+          verdictByReviewer.set(r.userId, r.decision);
+        }
+        const verdicts = Array.from(verdictByReviewer.values());
+
+        // Aggregate across reviewers — one reviewer's approval must not
+        // override another reviewer's standing request-changes. Comments leave
+        // the status unchanged.
+        const newStatus =
+          decision === "comment"
+            ? existing.status
+            : verdicts.includes("request-changes")
+              ? "changes-requested"
+              : verdicts.includes("approve")
+                ? "approved"
+                : existing.status;
+
+        return {
+          reviews: [...existing.reviews, review],
+          status: newStatus,
+          activityLog: [
+            ...this.cleanActivityLog(existing.activityLog),
+            activityEntry,
+          ],
+        } as UpdateProps<Revision>;
+      },
+    );
+    if (!updated) throw new Error("Revision not found");
+    return updated;
   }
 
   // Proposed changes
@@ -876,6 +956,42 @@ export class RevisionModel extends BaseClass {
    * entity change *before* calling this so the merged revision is a faithful
    * record of a change that has actually landed.
    */
+  /**
+   * Returns active draft status counts per saved-group ID.
+   * Mirrors `getActiveDraftStates` in FeatureRevisionModel but operates on
+   * the shared Revision collection (target.type === "saved-group").
+   */
+  async getActiveDraftStates(
+    groupIds?: string[],
+  ): Promise<Record<string, Partial<Record<ActiveDraftStatus, number>>>> {
+    const filter: Record<string, unknown> = {
+      "target.type": "saved-group",
+      status: { $in: ACTIVE_DRAFT_STATUSES },
+    };
+    if (groupIds && groupIds.length > 0) {
+      filter["target.id"] = { $in: groupIds };
+    }
+    const docs = await this._dangerousGetCollection()
+      .find(
+        { organization: this.context.org.id, ...filter },
+        { projection: { "target.id": 1, status: 1, _id: 0 } },
+      )
+      .toArray();
+
+    const result: Record<
+      string,
+      Partial<Record<ActiveDraftStatus, number>>
+    > = {};
+    for (const doc of docs) {
+      const gid = doc.target?.id as string;
+      const status = doc.status as ActiveDraftStatus;
+      if (!gid) continue;
+      if (!result[gid]) result[gid] = {};
+      result[gid][status] = (result[gid][status] ?? 0) + 1;
+    }
+    return result;
+  }
+
   async createMerged(params: {
     type: RevisionTargetType;
     id: string;
